@@ -15,10 +15,12 @@ book nilweb.static.files
 
 read nil.std.io.file
 read nil.std.core
+read nil.std.text.string_utils
 read nil.std.text
 read everything from nilweb.text.scan
 read everything from nilweb.http.status
 read everything from nilweb.http.headers
+read everything from nilweb.http.request
 read everything from nilweb.http.response
 
 
@@ -188,4 +190,332 @@ last-extension receives name as text returns text begin paragraph
     value after is dot plus 1
     give nil.std.text::substring with s being name, start being after,
         length being (nil.std.text::length with s being name) minus after
+end paragraph
+
+
+!!! =============================================================================
+!!! Revalidation, ranges, and a content cache
+!!! =============================================================================
+!!!
+!!! `serve-file` above answers every request with the whole file, which is
+!!! correct and wasteful: a browser that already has the stylesheet fetches it
+!!! again on every page, and a client resuming a download starts over. These
+!!! are the three things a static file server is expected to do about that.
+
+
+!!! --- A file's identity, for deciding whether a client's copy is current.
+
+public validators begin record
+    field found as boolean
+    field width as number
+    field stamped-at as number
+    field tag as text
+end record
+
+
+!!! --- Read a file's size and timestamp without reading the file.
+!!!
+!!! The ETag is built from both, which is what Apache does by default and is
+!!! sound for the same reason: a file whose length and modification time are
+!!! both unchanged is, barring deliberate effort, unchanged. A content hash
+!!! would be stronger and needs a hash function the standard library does not
+!!! have yet.
+!!!
+!!! Quoted and not weak-prefixed, because it compares byte-for-byte: two
+!!! responses with this tag really are the same bytes, so it is usable for
+!!! ranges as well as for revalidation, which a weak tag is not.
+
+public validators-of receives root as text, path as text returns validators begin paragraph
+    value relative is without-leading-slash with path being path
+    when not (is-safe-name with name being relative) or relative equals "" then
+        give build validators with found being false, width being 0, stamped-at being 0, tag being ""
+    end when
+    value full is when root equals "" give relative otherwise give root plus "/" plus relative end when
+    when not (nil.std.io::exists with path being full) then
+        give build validators with found being false, width being 0, stamped-at being 0, tag being ""
+    end when
+
+    variable width as number is 0 minus 1
+    value measured is nil.std.io::size with path being full
+    consider measured
+        when Result.Ok holding found-width then set width to found-width
+        otherwise set width to 0 minus 1
+    end consider
+    variable stamped as number is 0 minus 1
+    value timed is nil.std.io::modified_at with path being full
+    consider timed
+        when Result.Ok holding at-ms then set stamped to at-ms
+        otherwise set stamped to 0 minus 1
+    end consider
+    when width is less than 0 or stamped is less than 0 then
+        give build validators with found being false, width being 0, stamped-at being 0, tag being ""
+    end when
+
+    give build validators with found being true, width being width, stamped-at being stamped,
+        tag being quote plus (base-sixteen with amount being stamped) plus "-"
+            plus (base-sixteen with amount being width) plus quote
+end paragraph
+
+
+!!! --- Serve a file, answering 304 when the client's copy is still good.
+!!!
+!!! The 304 carries the ETag and the caching headers and no body, which is the
+!!! whole point: the client keeps what it has and the server sends a few dozen
+!!! bytes instead of a few kilobytes.
+!!!
+!!! A 304 must not carry Content-Type or Content-Length — the response is not
+!!! the representation, and a client told otherwise may believe the
+!!! representation is now empty. render-response drops the body for a 304 and
+!!! omits Content-Length; Content-Type is never set because this builds the
+!!! response directly rather than through make-response.
+
+public serve-revalidated receives root as text, path as text, request as http-request,
+    seconds as number returns http-response begin paragraph
+    value marks is validators-of with root being root, path being path
+    when not marks.found then
+        give error-response with code being status-not-found, explanation being "No such file"
+    end when
+
+    value offered is header-of with request being request, name being "If-None-Match"
+    when tag-matches with offered being offered, tag being marks.tag then
+        variable fields is no-headers with nothing
+        set fields to set-field with fields being fields, name being "ETag", content being marks.tag
+        set fields to set-field with fields being fields, name being "Cache-Control",
+            content being "public, max-age=" plus (seconds becomes text)
+        give build http-response with code being status-not-modified, fields being fields, body being ""
+    end when
+
+    value answer is serve-file with root being root, path being path
+    when answer.code does not equal status-ok then
+        give answer
+    end when
+    value tagged is with-header with response being answer, name being "ETag", content being marks.tag
+    give with-header with response being tagged, name being "Cache-Control",
+        content being "public, max-age=" plus (seconds becomes text)
+end paragraph
+
+
+!!! --- Whether an If-None-Match names this representation.
+!!!
+!!! `*` matches anything that exists, which is what a conditional request uses
+!!! to mean "if there is one at all". Otherwise the field is a comma-separated
+!!! list and a match is a match; the weak prefix is accepted and ignored,
+!!! because a client that sends `W/"x"` for a tag it was given as `"x"` is
+!!! being imprecise rather than asking about a different thing.
+
+tag-matches receives offered as text, tag as text returns boolean begin paragraph
+    when offered equals "" then
+        give false
+    end when
+    value trimmed is nil.std.text::trim with s being offered
+    when trimmed equals "*" then
+        give true
+    end when
+    value parts is split-on with input being trimmed, separator being ","
+    repeat for each part in parts
+        value one is nil.std.text::trim with s being part
+        value bare is when nil.std.text::starts_with with s being one, prefix being "W/"
+            give nil.std.text::substring with s being one, start being 2,
+                length being (nil.std.text::length with s being one) minus 2
+            otherwise give one
+        end when
+        when bare equals tag then
+            give true
+        end when
+    end repeat
+    give false
+end paragraph
+
+
+!!! --- A requested byte range, as the client asked for it.
+
+public asked-range begin record
+    field present as boolean
+    field satisfiable as boolean
+    field first-byte as number
+    field last-byte as number
+end record
+
+
+!!! --- Read a Range header against a known length.
+!!!
+!!! One range only. A multi-range request is answered with the whole file,
+!!! which RFC 9110 explicitly permits and which avoids generating a multipart
+!!! body for a case almost nothing sends.
+!!!
+!!! `bytes=-500` means the last 500 bytes, `bytes=500-` means from 500 to the
+!!! end, and `bytes=0-0` is the first byte. A first byte past the end is
+!!! unsatisfiable and must be answered 416 rather than clamped, because a
+!!! client resuming a download that has since shrunk needs to be told.
+
+public range-of receives stated as text, width as number returns asked-range begin paragraph
+    value absent is build asked-range with present being false, satisfiable being false,
+        first-byte being 0, last-byte being 0
+    when stated equals "" then
+        give absent
+    end when
+    value trimmed is nil.std.text::trim with s being stated
+    when not (nil.std.text::starts_with with s being trimmed, prefix being "bytes=") then
+        !!! An unknown unit is ignored, as RFC 9110 requires, rather than
+        !!! refused: the whole representation is a valid answer to it.
+        give absent
+    end when
+    value spec is nil.std.text::trim with s being
+        (nil.std.text::substring with s being trimmed, start being 6,
+            length being (nil.std.text::length with s being trimmed) minus 6)
+    when nil.std.text::contains with s being spec, needle being "," then
+        give absent
+    end when
+
+    value first-text is nil.std.text::trim with s being (before-first with input being spec, separator being "-")
+    value last-text is nil.std.text::trim with s being (after-first with input being spec, separator being "-")
+    when not (nil.std.text::contains with s being spec, needle being "-") then
+        give unsatisfiable with nothing
+    end when
+
+    !!! A suffix range: the last N bytes.
+    when first-text equals "" then
+        value wanted is count-of with digits being last-text
+        when wanted is at most 0 then
+            give unsatisfiable with nothing
+        end when
+        value taken is when wanted is greater than width give width otherwise give wanted end when
+        give build asked-range with present being true, satisfiable being true,
+            first-byte being width minus taken, last-byte being width minus 1
+    end when
+
+    value first-byte is count-of with digits being first-text
+    when first-byte is less than 0 or first-byte is at least width then
+        give unsatisfiable with nothing
+    end when
+    when last-text equals "" then
+        give build asked-range with present being true, satisfiable being true,
+            first-byte being first-byte, last-byte being width minus 1
+    end when
+    value last-byte is count-of with digits being last-text
+    when last-byte is less than first-byte then
+        give unsatisfiable with nothing
+    end when
+    value clamped is when last-byte is at least width give width minus 1 otherwise give last-byte end when
+    give build asked-range with present being true, satisfiable being true,
+        first-byte being first-byte, last-byte being clamped
+end paragraph
+
+
+unsatisfiable returns asked-range begin paragraph
+    give build asked-range with present being true, satisfiable being false,
+        first-byte being 0, last-byte being 0
+end paragraph
+
+
+!!! --- A decimal count, or minus one when the text is not one.
+!!! Hand-rolled rather than borrowed, because a Range header is attacker-
+!!! supplied and a parser that raises on malformed input is a parser that
+!!! stops the server.
+
+count-of receives digits as text returns number begin paragraph
+    value width is nil.std.text::length with s being digits
+    when width is less than 1 or width is greater than 18 then
+        give 0 minus 1
+    end when
+    variable total as number is 0
+    variable index as number is 0
+    repeat while index is less than width
+        value code is nil.std.text::byte_at with s being digits, index being index
+        when code is less than 48 or code is greater than 57 then
+            give 0 minus 1
+        end when
+        set total to (total times 10) plus (code minus 48)
+        set index to index plus 1
+    end repeat
+    give total
+end paragraph
+
+
+!!! --- Serve a file, honouring Range and If-None-Match.
+!!!
+!!! What a browser fetching a video or a client resuming a download expects.
+!!! Accept-Ranges is advertised on the full response too, because a client
+!!! only asks for a range if it has been told ranges are available.
+
+public serve-static receives root as text, path as text, request as http-request,
+    seconds as number returns http-response begin paragraph
+    value marks is validators-of with root being root, path being path
+    when not marks.found then
+        give error-response with code being status-not-found, explanation being "No such file"
+    end when
+
+    value wanted is range-of with stated being
+        (header-of with request being request, name being "Range"), width being marks.width
+    when not wanted.present then
+        value whole is serve-revalidated with root being root, path being path,
+            request being request, seconds being seconds
+        when whole.code does not equal status-ok then
+            give whole
+        end when
+        give with-header with response being whole, name being "Accept-Ranges", content being "bytes"
+    end when
+
+    when not wanted.satisfiable then
+        !!! 416 carries Content-Range naming the real length, which is how a
+        !!! client that was resuming discovers the file is a different size.
+        value refusal is error-response with code being status-range-not-satisfiable,
+            explanation being "That range is outside the file"
+        value ranged is with-header with response being refusal, name being "Content-Range",
+            content being "bytes */" plus (marks.width becomes text)
+        give with-header with response being ranged, name being "Accept-Ranges", content being "bytes"
+    end when
+
+    value answer is serve-file with root being root, path being path
+    when answer.code does not equal status-ok then
+        give answer
+    end when
+    value taken is nil.std.text::substring with s being answer.body, start being wanted.first-byte,
+        length being wanted.last-byte minus wanted.first-byte plus 1
+    variable partial is with-body with response being (with-status with response being answer,
+        code being status-partial-content), body being taken
+    set partial to with-header with response being partial, name being "Content-Range",
+        content being "bytes " plus (wanted.first-byte becomes text) plus "-"
+            plus (wanted.last-byte becomes text) plus "/" plus (marks.width becomes text)
+    set partial to with-header with response being partial, name being "Accept-Ranges", content being "bytes"
+    set partial to with-header with response being partial, name being "ETag", content being marks.tag
+    give partial
+end paragraph
+
+
+!!! --- A whole number in lower-case hexadecimal, for the ETag.
+
+base-sixteen receives amount as number returns text begin paragraph
+    when amount is at most 0 then
+        give "0"
+    end when
+    variable rest as number is amount
+    variable out as text is ""
+    repeat while rest is greater than 0
+        set out to (hex-glyph with amount being (rest remainder 16)) plus out
+        set rest to rest over 16
+    end repeat
+    give out
+end paragraph
+
+
+hex-glyph receives amount as number returns text begin paragraph
+    give switch amount
+        case 0 then stop switching with "0"
+        case 1 then stop switching with "1"
+        case 2 then stop switching with "2"
+        case 3 then stop switching with "3"
+        case 4 then stop switching with "4"
+        case 5 then stop switching with "5"
+        case 6 then stop switching with "6"
+        case 7 then stop switching with "7"
+        case 8 then stop switching with "8"
+        case 9 then stop switching with "9"
+        case 10 then stop switching with "a"
+        case 11 then stop switching with "b"
+        case 12 then stop switching with "c"
+        case 13 then stop switching with "d"
+        case 14 then stop switching with "e"
+        otherwise stop switching with "f"
+    end switch
 end paragraph

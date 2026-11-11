@@ -25,6 +25,7 @@
 
 book nilweb.template.render
 
+read nil.std.core
 read nil.std.io.file
 read nil.std.text
 read everything from nilweb.text.scan
@@ -184,6 +185,134 @@ unquoted receives raw as text returns text begin paragraph
 end paragraph
 
 
+!!! --- The compiled-template cache.
+!!!
+!!! Rendering a page meant reading three files and tokenising all of them, on
+!!! every request: measured on the demonstration application, a templated page
+!!! served at half the rate of one that returned plain text, and the whole of
+!!! that difference was this.
+!!!
+!!! Keyed by path and validated against the file's modification time, so a
+!!! template edited while the server runs is picked up without a restart and
+!!! an unchanged one costs a timestamp check rather than a read and a parse.
+!!! That is why nil.std.io grew `modified_at`: without it a cache cannot tell
+!!! whether what it holds is current except by re-reading the file, which is
+!!! the thing the cache exists to avoid.
+
+cached-template begin record
+    field path as text
+    field tokens as array of template-token
+    field layout as text
+    field stamped-at as number
+    field live as boolean
+end record
+
+
+public variable cache-store as array of cached-template is []
+
+!!! Whether to trust the cache without checking the file's timestamp.
+!!!
+!!! Off by default, because a template edited during development that does not
+!!! appear is a confusing minute. On, a page costs no filesystem call at all,
+!!! which is what a server fronting unchanging templates wants.
+public variable cache-is-frozen as boolean is false
+
+
+public freeze-cache receives frozen as boolean returns nothing begin paragraph
+    set nilweb.template.render::cache-is-frozen to frozen
+    give nothing
+end paragraph
+
+
+public clear-cache returns nothing begin paragraph
+    variable empty as array of cached-template is []
+    set nilweb.template.render::cache-store to empty
+    give nothing
+end paragraph
+
+
+public cached-count returns number begin paragraph
+    variable total as number is 0
+    repeat for each one in nilweb.template.render::cache-store
+        when one.live then
+            set total to total plus 1
+        end when
+    end repeat
+    give total
+end paragraph
+
+
+stamp-of receives path as text returns number begin paragraph
+    value found is nil.std.io::modified_at with path being path
+    consider found
+        when Result.Ok holding stamped then give stamped
+        otherwise give 0 minus 1
+    end consider
+end paragraph
+
+
+cache-slot-of receives path as text returns number begin paragraph
+    variable index as number is 0
+    repeat while index is less than the length of nilweb.template.render::cache-store
+        value one is nilweb.template.render::cache-store at index
+        when one.live and one.path equals path then
+            give index
+        end when
+        set index to index plus 1
+    end repeat
+    give 0 minus 1
+end paragraph
+
+
+!!! --- The tokens for a template, from the cache when they are current.
+
+public prepared begin record
+    field tokens as array of template-token
+    field layout as text
+    field ready as boolean
+    field complaint as text
+end record
+
+
+public prepare receives name as text, root as text returns prepared begin paragraph
+    variable none-yet as array of template-token is []
+    value guarded is guard-name with name being name
+    when not (guarded equals "") then
+        give build prepared with tokens being none-yet, layout being "", ready being false,
+            complaint being guarded
+    end when
+    value path is when root equals "" give name otherwise give root plus "/" plus name end when
+
+    value slot is cache-slot-of with path being path
+    when slot is at least 0 then
+        value held is nilweb.template.render::cache-store at slot
+        value still-good is nilweb.template.render::cache-is-frozen
+            or (stamp-of with path being path) equals held.stamped-at
+        when still-good then
+            give build prepared with tokens being held.tokens, layout being held.layout,
+                ready being true, complaint being ""
+        end when
+    end when
+
+    value loaded is load-template with name being name, root being root
+    when not loaded.rendered then
+        give build prepared with tokens being none-yet, layout being "", ready being false,
+            complaint being loaded.complaint
+    end when
+    value tokens is tokenize with source being loaded.text-out
+    value layout is first-layout with tokens being tokens
+    value fresh is build cached-template with path being path, tokens being tokens,
+        layout being layout, stamped-at being (stamp-of with path being path), live being true
+    when slot is at least 0 then
+        set nilweb.template.render::cache-store at slot to fresh
+    otherwise
+        append fresh to nilweb.template.render::cache-store
+    end when
+    give build prepared with tokens being tokens, layout being layout, ready being true,
+        complaint being ""
+end paragraph
+
+
 !!! --- Render a template held as text.
 
 public render-source receives source as text, page-data as render-context, root as text
@@ -196,13 +325,65 @@ end paragraph
 
 public render-file receives name as text, page-data as render-context, root as text
     returns render-result begin paragraph
-    value loaded is load-template with name being name, root being root
-    when not loaded.rendered then
-        give loaded
-    end when
-    give render-at-depth with source being loaded.text-out, page-data being page-data, root being root, depth being 0
+    give render-cached with name being name, page-data being page-data, root being root, depth being 0
 end paragraph
 
+
+!!! --- Render a template from the cache, including its layout and includes.
+!!!
+!!! The same walk as render-at-depth, but starting from tokens that were
+!!! already parsed rather than from text that has to be. A page with a layout
+!!! and a partial costs three timestamp checks instead of three reads and
+!!! three parses.
+
+render-cached receives name as text, page-data as render-context, root as text, depth as number
+    returns render-result begin paragraph
+    when depth is greater than nesting-limit then
+        give failed-render with complaint being "templates nest more than "
+            plus (nesting-limit becomes text) plus " deep; this is a cycle"
+    end when
+    value ready is prepare with name being name, root being root
+    when not ready.ready then
+        give failed-render with complaint being ready.complaint
+    end when
+
+    value inner is render-range with tokens being ready.tokens, start-at being 0,
+        upto being the length of ready.tokens, page-data being page-data, root being root,
+        depth being depth
+    when not inner.rendered then
+        give inner
+    end when
+    when ready.layout equals "" then
+        give inner
+    end when
+
+    value shell is prepare with name being ready.layout, root being root
+    when not shell.ready then
+        give failed-render with complaint being shell.complaint
+    end when
+    give render-with-slot with tokens being shell.tokens, inner being inner.text-out,
+        page-data being page-data, root being root, depth being depth plus 1
+end paragraph
+
+
+!!! --- Render a layout, dropping the page in at its content slot.
+!!!
+!!! The page's output is placed where the slot is rather than spliced into the
+!!! layout's text beforehand, which is what lets the layout stay parsed in the
+!!! cache. It also means the page's output is never rescanned for tags it does
+!!! not contain.
+!!!
+!!! Rendered as two ranges around the slot, not token by token. Token by token
+!!! was the first version and it was wrong: a `<% if %>` in a layout spans
+!!! several tokens, and rendering one of them alone finds no `<% end %>` and
+!!! reports an unclosed block in a layout that is perfectly well formed.
+
+!!! --- Render a template held as text, which is what render-source is for.
+!!!
+!!! Text rather than a cached path, so it takes the slower route: tokenise,
+!!! render, and splice a layout if one is named. Used by tests and by anything
+!!! holding a template it did not read from a file. A page served from disk
+!!! goes through render-cached instead.
 
 render-at-depth receives source as text, page-data as render-context, root as text, depth as number
     returns render-result begin paragraph
@@ -218,36 +399,20 @@ render-at-depth receives source as text, page-data as render-context, root as te
         give inner
     end when
 
-    !!! A layout wraps the page: the page renders first, then the layout
-    !!! renders with the page's output dropped in at <%@ content %>. Declared
-    !!! anywhere in the file, because a layout line at the top is a convention
-    !!! and not a parsing requirement.
     value wrapper is first-layout with tokens being tokens
     when wrapper equals "" then
         give inner
     end when
-    value shell is load-template with name being wrapper, root being root
-    when not shell.rendered then
-        give shell
+    value shell is prepare with name being wrapper, root being root
+    when not shell.ready then
+        give failed-render with complaint being shell.complaint
     end when
-    value wrapped is render-at-depth with source being
-        (filled-slot with shell being shell.text-out, inner being inner.text-out),
+    give render-with-slot with tokens being shell.tokens, inner being inner.text-out,
         page-data being page-data, root being root, depth being depth plus 1
-    give wrapped
 end paragraph
 
 
-!!! --- Put the page into the layout before the layout is rendered, so a
-!!! layout's own tags still run and the page's output is never re-scanned for
-!!! tags it does not contain.
-
-filled-slot receives shell as text, inner as text returns text begin paragraph
-    variable out as text is shell
-    set out to nil.std.text::replace with s being out, old_value being "<%@ content %>", new_value being inner
-    set out to nil.std.text::replace with s being out, old_value being "<%@content%>", new_value being inner
-    give out
-end paragraph
-
+!!! --- The layout a token list names, or "" when it names none.
 
 first-layout receives tokens as array of template-token returns text begin paragraph
     repeat for each token in tokens
@@ -256,6 +421,50 @@ first-layout receives tokens as array of template-token returns text begin parag
         end when
     end repeat
     give ""
+end paragraph
+
+
+render-with-slot receives tokens as array of template-token, inner as text,
+    page-data as render-context, root as text, depth as number returns render-result begin paragraph
+    when depth is greater than nesting-limit then
+        give failed-render with complaint being "templates nest more than "
+            plus (nesting-limit becomes text) plus " deep; this is a cycle"
+    end when
+
+    value total is the length of tokens
+    value slot is slot-index-of with tokens being tokens
+    when slot is less than 0 then
+        !!! A layout with no content slot swallows the page. Reported rather
+        !!! than rendered, because a layout that silently discards what it was
+        !!! wrapping is a blank page with no explanation.
+        give failed-render with complaint being
+            "a layout must contain <%@ content %>, and this one does not"
+    end when
+
+    value before is render-range with tokens being tokens, start-at being 0, upto being slot,
+        page-data being page-data, root being root, depth being depth
+    when not before.rendered then
+        give before
+    end when
+    value after is render-range with tokens being tokens, start-at being slot plus 1, upto being total,
+        page-data being page-data, root being root, depth being depth
+    when not after.rendered then
+        give after
+    end when
+    give build render-result with text-out being before.text-out plus inner plus after.text-out,
+        rendered being true, complaint being ""
+end paragraph
+
+
+slot-index-of receives tokens as array of template-token returns number begin paragraph
+    variable index as number is 0
+    repeat while index is less than the length of tokens
+        when (tokens at index).kind equals "slot" then
+            give index
+        end when
+        set index to index plus 1
+    end repeat
+    give 0 minus 1
 end paragraph
 
 
@@ -282,11 +491,7 @@ render-range receives tokens as array of template-token, start-at as number, upt
             !!! Only meaningful inside a layout, where it was already filled.
             set index to index plus 1
         otherwise when kind equals "include" then
-            value part is load-template with name being token.body, root being root
-            when not part.rendered then
-                give part
-            end when
-            value done is render-at-depth with source being part.text-out, page-data being page-data,
+            value done is render-cached with name being token.body, page-data being page-data,
                 root being root, depth being depth plus 1
             when not done.rendered then
                 give done
@@ -421,15 +626,9 @@ end paragraph
 !!! nobody tested, and a template name has no legitimate reason to climb.
 
 public load-template receives name as text, root as text returns render-result begin paragraph
-    when name equals "" then
-        give failed-render with complaint being "a template was asked for by an empty name"
-    end when
-    when nil.std.text::contains with s being name, needle being ".." then
-        give failed-render with complaint being "a template name may not climb out of the template directory: " plus name
-    end when
-    when (nil.std.text::starts_with with s being name, prefix being "/")
-        or (nil.std.text::contains with s being name, needle being ":") then
-        give failed-render with complaint being "a template name must be relative: " plus name
+    value guarded is guard-name with name being name
+    when not (guarded equals "") then
+        give failed-render with complaint being guarded
     end when
 
     value path is when root equals "" give name otherwise give root plus "/" plus name end when
@@ -445,6 +644,27 @@ public load-template receives name as text, root as text returns render-result b
         otherwise
             give failed-render with complaint being "could not read template " plus name
     end consider
+end paragraph
+
+
+!!! --- Whether a template name is allowed, as a complaint or "" for allowed.
+!!!
+!!! Refused by shape rather than resolved and then checked. The
+!!! check-after-resolve shape is the one that goes wrong on the platform
+!!! nobody tested, and a template name has no legitimate reason to climb.
+
+guard-name receives name as text returns text begin paragraph
+    when name equals "" then
+        give "a template was asked for by an empty name"
+    end when
+    when nil.std.text::contains with s being name, needle being ".." then
+        give "a template name may not climb out of the template directory: " plus name
+    end when
+    when (nil.std.text::starts_with with s being name, prefix being "/")
+        or (nil.std.text::contains with s being name, needle being ":") then
+        give "a template name must be relative: " plus name
+    end when
+    give ""
 end paragraph
 
 

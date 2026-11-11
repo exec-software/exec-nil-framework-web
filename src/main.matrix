@@ -28,8 +28,9 @@ read everything from nilweb.template.context
 read everything from nilweb.template.render
 read everything from nilweb.session.session
 read everything from nilweb.static.files
+read nil.std.text.string_utils
 read everything from nilweb.middleware.chain
-read everything from nilweb.server.listener
+read everything from nilweb.server.engine
 read nil.std.system.environment
 
 
@@ -114,7 +115,7 @@ run-handler receives name as text, request as http-request, found as route-resul
         case "search" then
             stop switching with (search-page with request being request)
         case "asset" then
-            stop switching with (asset-file with found being found)
+            stop switching with (asset-file with request being request, found being found)
         case "create-user" then
             stop switching with (create-user with request being request)
         otherwise
@@ -193,9 +194,14 @@ search-page receives request as http-request returns http-response begin paragra
 end paragraph
 
 
-asset-file receives found as route-result returns http-response begin paragraph
+!!! Through serve-static, so an asset gets an ETag, answers a revalidation
+!!! with 304, and honours a Range request. A browser that already has the
+!!! stylesheet then sends a conditional request and gets a few dozen bytes
+!!! back instead of the file.
+asset-file receives request as http-request, found as route-result returns http-response begin paragraph
     value rest is capture-of with result being found, name being "rest"
-    give serve-cached with root being public-root, path being "assets/" plus rest, seconds being 3600
+    give serve-static with root being public-root, path being "assets/" plus rest,
+        request being request, seconds being 3600
 end paragraph
 
 
@@ -232,52 +238,128 @@ end paragraph
 
 !!! --- Serve for real.
 !!!
-!!! One connection at a time, which is what the language allows: no threads to
-!!! hand a connection to, and no way to wait on several sockets at once. Good
-!!! enough for development and for anything behind a proxy, and honest about
-!!! being so.
+!!! An event loop: poll says which sockets can be acted on, the engine frames
+!!! whole requests out of whatever arrived, and this loop answers them one at a
+!!! time. Many connections are open at once; none of them can hold up another
+!!! by sending slowly, reading slowly, or stopping halfway.
 !!!
-!!! The loop owns no routing. It reads a request, hands the text to `answer`,
-!!! and writes back what comes out — the same `answer` the demonstration below
-!!! calls with a fixture, so what is served is exactly what is tested.
+!!! The loop owns no routing. It takes a framed request, hands the text to
+!!! `answer`, and hands the result back to the engine — the same `answer` the
+!!! demonstration calls with a fixture, so what is served is what is tested.
 
-serve receives host as text, port as number returns number begin paragraph
-    value server is bind-server with host being host, port being port
-    when not server.listening then
+!!! How many connections may be open at once. Every one holds its accumulated
+!!! request, so this is a memory ceiling as much as a load one.
+constant connection-ceiling as number is 1024
+
+!!! How long a pass waits when nothing is happening. Short enough that the
+!!! idle sweep runs promptly, long enough that an idle server is idle.
+constant pass-timeout-ms as number is 1000
+
+serve receives host as text, port as number, share as boolean returns number begin paragraph
+    variable server is start-engine with host being host, port being port, limit being connection-ceiling
+    when not server.live then
         say "nil-web could not listen: " plus server.complaint
         give 1
     end when
+    when share then
+        value sharing is share-port with server being server
+        when not sharing then
+            say "nil-web could not share the port; running alone."
+        end when
+    end when
+
+    !!! Frozen while serving: a template does not change under a running
+    !!! server, and frozen means a page costs no filesystem call at all. Set
+    !!! NILWEB_RELOAD to leave it thawed while editing templates.
+    value reloading is nil.std.system::get_environment_variable with name being "NILWEB_RELOAD"
+    consider reloading
+        when Option.Some holding wanted then
+            evaluate freeze-cache with frozen being (wanted equals "")
+        otherwise evaluate freeze-cache with frozen being true
+    end consider
+
     say "nil-web listening on " plus (address-text with host being host, port being port)
     say "Ctrl-C to stop."
 
     repeat forever
-        value incoming is accept-request with server being server
-        when not incoming.accepted-ok then
-            say "accept failed: " plus incoming.complaint
+        value ready is pump with server being server, timeout being pass-timeout-ms
+        when ready.found then
+            value reply-text is answer with raw being ready.request
+            evaluate reply with server being server, handle being ready.handle,
+                response being (with-connection-header with response-text being reply-text,
+                    keeping being ready.keep-alive),
+                keep-open being ready.keep-alive
         end when
-        when incoming.accepted-ok and not incoming.served then
-            !!! A connection that closed before asking anything, or one whose
-            !!! read failed. Browsers open speculative sockets constantly, so
-            !!! this is not worth a line unless something was actually wrong.
-            when not (incoming.complaint equals "") then
-                say "request dropped: " plus incoming.complaint
-            end when
-            evaluate discard with connection being incoming.connection
-        end when
-        when incoming.accepted-ok and incoming.served then
-            value reply is answer with raw being incoming.request
-            value trouble is answer-and-close with connection being incoming.connection, response being reply
-            when not (trouble equals "") then
-                say "response not delivered: " plus trouble
+        when not ready.found then
+            !!! Nothing framed this pass. Close whatever has stopped making
+            !!! progress: a connection that said nothing, one sending a request
+            !!! a byte at a time, or one idle between keep-alive requests.
+            evaluate sweep-idle with server being server
+            when not (server.complaint equals "") then
+                say "loop: " plus server.complaint
+                set server.complaint to ""
             end when
         end when
     end repeat
-    evaluate stop-server with server being server
+    evaluate stop-engine with server being server
     give 0
 end paragraph
 
 
+!!! --- Tell the client what is happening to its connection.
+!!!
+!!! A keep-alive response must say so, and a response that ends the
+!!! connection must say that too: a client left to guess will guess, and a
+!!! client that guesses wrong either hangs waiting for a closed socket or
+!!! sends its next request into one.
+!!!
+!!! Inserted after the status line rather than built into the response record,
+!!! because whether the connection is kept is the loop's decision and not the
+!!! handler's.
+
+with-connection-header receives response-text as text, keeping as boolean returns text begin paragraph
+    value marker is crlf with nothing
+    value cut is nil.std.text::index_of with s being response-text, needle being marker
+    when cut is less than 0 then
+        give response-text
+    end when
+    value line-end is cut plus (nil.std.text::length with s being marker)
+    value status-line is nil.std.text::substring with s being response-text, start being 0, length being line-end
+    value rest is nil.std.text::substring with s being response-text, start being line-end,
+        length being (nil.std.text::length with s being response-text) minus line-end
+    value stated is when keeping give "Connection: keep-alive" otherwise give "Connection: close" end when
+    give status-line plus stated plus marker plus rest
+end paragraph
+
+
 !!! --- The port to serve on, from NILWEB_PORT, defaulting to 8080.
+
+!!! --- The address to bind. Loopback unless NILWEB_HOST says otherwise,
+!!! because a server that reaches the network by default is one that reached
+!!! the café wifi before anyone decided it should.
+
+chosen-host returns text begin paragraph
+    value stated is nil.std.system::get_environment_variable with name being "NILWEB_HOST"
+    consider stated
+        when Option.Some holding text-held then
+            give when text-held equals "" give "127.0.0.1" otherwise give text-held end when
+        otherwise give "127.0.0.1"
+    end consider
+end paragraph
+
+
+!!! --- Whether to share the port with sibling processes, for more than one
+!!! core. Off unless asked, because two servers quietly splitting traffic is
+!!! worse than one refusing to start.
+
+wants-shared-port returns boolean begin paragraph
+    value stated is nil.std.system::get_environment_variable with name being "NILWEB_SHARE_PORT"
+    consider stated
+        when Option.Some holding text-held then give not (text-held equals "")
+        otherwise give false
+    end consider
+end paragraph
+
 
 chosen-port returns number begin paragraph
     value stated is nil.std.system::get_environment_variable with name being "NILWEB_PORT"
@@ -318,14 +400,15 @@ main returns number begin paragraph
     consider serving
         when Option.Some holding wanted then begin block
             when not (wanted equals "") then
-                give serve with host being "127.0.0.1", port being (chosen-port with nothing)
+                give serve with host being (chosen-host with nothing),
+                    port being (chosen-port with nothing), share being (wants-shared-port with nothing)
             end when
         end block
         otherwise say ""
     end consider
 
     say "nil-web demonstration: requests in, responses out."
-    say "Set NILWEB_SERVE=1 to serve on 127.0.0.1 (NILWEB_PORT, default 8080)."
+    say "Set NILWEB_SERVE=1 to serve (NILWEB_HOST, NILWEB_PORT, NILWEB_SHARE_PORT)."
 
     evaluate show with title being "GET / (template, layout, partial)",
         raw being (wire-request with line being "GET / HTTP/1.1", fields being "Host: localhost", body being "")

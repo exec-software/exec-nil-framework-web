@@ -1,0 +1,5 @@
+<!doctype html>
+<% if signed-in %><header>Hello <%= who %></header>
+<% else %><header>Sign in</header>
+<% end %><%@ content %>
+<% for crumb in trail %>[<%= crumb.name %>]<% end %>

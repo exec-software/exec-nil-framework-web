@@ -1,0 +1,1 @@
+<%@ layout "layouts/blocky.nilhtml" %><p><%= heading %></p>

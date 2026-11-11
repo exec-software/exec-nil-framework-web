@@ -10,8 +10,8 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-Built and tested end to end — 272 checks, all passing, and a server that
-serves.
+Built and tested end to end — 330 checks, all passing, and a server that holds
+many connections at once.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -28,11 +28,11 @@ serves.
 | `nilweb.session.session` | a server-side store, secure ids, cookie attributes | done |
 | `nilweb.static.files` | serving a directory, with the traversal checks | done |
 | `nilweb.middleware.chain` | guards before a handler, finishers after | done |
-| `nilweb.server.listener` | binding, accepting, request framing | done |
+| `nilweb.server.engine` | the event loop: accepting, framing, keep-alive | done |
 
 ```sh
 ./scripts/serve.sh   # a real server on 127.0.0.1:8080
-./scripts/test.sh    # 272 checks
+./scripts/test.sh    # 330 checks
 ./scripts/demo.sh    # the same requests, printed instead of served
 ```
 
@@ -42,35 +42,113 @@ All three take `NIL_SDK` if the framework is not a sibling checkout, and
 It needs a framework with the socket, entropy and byte intrinsics — the commit
 "Sockets, secure random, and byte access to text" or later.
 
-## One connection at a time
+## Concurrency
 
-There is a server, and it serves: bind, accept, read until the request is
-framed, hand the text to the application, write the answer, close, repeat.
+An event loop, not a connection at a time. `poll` says which sockets can be
+acted on; the engine frames whole requests out of whatever arrived and the
+application answers them. Many connections are open at once and none can hold
+up another by sending slowly, reading slowly, or stopping halfway.
 
-It handles one connection at a time, and will until the language grows
-something to hand a connection to. There are no threads, no async, and no way
-to wait on several sockets at once — that last one is the piece that would have
-to arrive first. So this is a development server, a local tool, or something
-behind a reverse proxy that absorbs the slow clients. Every accepted
-connection gets a 15-second silence deadline, because a single-threaded loop
-without one is a single slow client away from serving nobody.
+Measured on the demonstration application: a client that stalls for 1.5
+seconds in the middle of its request headers does not delay 120 requests on 40
+other connections, which finish in 0.72s. 64 connections each sending a
+two-part request with a quarter-second pause are served in about one pause
+rather than 64 of them.
 
-No keep-alive: a connection is answered and closed. No TLS. A request is capped
-at 1 MiB, header and body together, and the cap stops the reading rather than
-rejecting afterwards.
+Throughput, 32 connections of 40 keep-alive requests each: **366 req/s**, zero
+errors. Per route, at 16 connections:
+
+| req/s | route | what it does |
+| --- | --- | --- |
+| 422 | `/search` | parse, route, plain text |
+| 403 | `/hello/ada` | parse, route, escape a capture |
+| 317 | `/` | template with a layout and a partial |
+| 274 | `/posts` | the same with a loop |
+| 243 | `/assets/app.css` | a file, with validators |
+
+That is a tree-walking interpreter rendering templates, so it is not Apache's
+number. It is the shape that matters: adding connections does not add latency
+until the single core is saturated.
+
+**Keep-alive** is on by default for HTTP/1.1 and off for HTTP/1.0 unless the
+client asks, which is the way round that avoids holding connections no client
+will use again. A connection serves up to 1000 requests before being closed
+anyway, so a long-lived client cannot pin a slot for the life of the process.
+
+**More than one core** means more than one process, because the interpreter
+holds one stack, one heap and one set of globals with no lock anywhere near
+them. `NILWEB_SHARE_PORT=1` turns on `SO_REUSEPORT` so several copies can share
+a port and the kernel balances accepts between them. That is nginx's shape
+rather than Apache's prefork, and it is the one this runtime can keep.
+
+**Three idle deadlines**, because the three cases differ: 10s for a connection
+that has sent nothing (a scan, or a browser's speculative socket), 20s for a
+request still arriving (which is what slowloris looks like), and 30s between
+keep-alive requests (a real client thinking). Requests are capped at 1 MiB and
+the cap stops the reading rather than rejecting afterwards. At most 1024
+connections are open at once; past that, new ones are closed immediately
+rather than queued, because a queue there is memory held for a client already
+being refused.
+
+### What is still missing for parity
+
+No TLS — it wants an intrinsic family over a TLS library, and until then this
+belongs behind something that terminates it. No HTTP/2, no compression (the
+standard library's `gzip_compress` is still an unbacked declaration), no
+`sendfile`, no access or error log, no configuration file, no virtual hosts,
+no reverse proxying. `poll` is O(n) per call in the watch set, which starts to
+matter in the thousands; the interface is shaped so `epoll` can replace it
+underneath without callers noticing.
 
 ### This used to say the opposite
 
 The first version of this framework had no server and this section explained
-why: the NIL runtime had no network intrinsics at all, `nil.std.net` was
-protocol values with a note saying the transport was deliberately absent, and
-the socket design under `nilstd/experimental` had nothing beneath it.
+why: the NIL runtime had no network intrinsics at all. The second had one that
+served a single connection at a time, because there were no threads and no way
+to wait on several sockets.
 
-That was a gap in the framework rather than a fact to design around, so it was
-filled in: `nil.std.net.socket` now exists, and so do
-`nil.std.security.random` and `nil.std.text`'s `byte_at`/`from_byte`, which
-closed the other two holes this framework had documented. See the framework's
+Both were gaps in the framework rather than facts to design around, so they
+were filled in: `nil.std.net.socket` with `poll`, non-blocking transfer and
+`SO_REUSEPORT`; `nil.std.security.random`; `nil.std.text`'s `byte_at` and
+`from_byte`; and `nil.std.io`'s `modified_at`. See the framework's
 [socket reference](https://github.com/exec-software/exec-nil-framework/blob/master/docs/standard-library/sockets.md).
+
+## Static files
+
+Served with the three things a static file server is expected to do about not
+re-sending what the client already has.
+
+**ETag and `If-None-Match`.** The tag is built from size and modification time
+— what Apache does by default, and sound for the same reason: a file whose
+length and mtime are both unchanged is, barring deliberate effort, unchanged.
+A content hash would be stronger and wants a hash function the standard
+library does not have yet. A client holding the current tag gets a 304 with no
+body, no `Content-Length` and no `Content-Type`, because the response is not
+the representation.
+
+**Byte ranges.** `bytes=0-9`, `bytes=500-`, `bytes=-500` for the last 500. A
+206 carries `Content-Range`; a first byte past the end is a 416 naming the real
+length, so a client resuming a download discovers the file changed size rather
+than being quietly handed the wrong bytes. One range per request — a
+multi-range request gets the whole file, which RFC 9110 permits and which
+avoids a multipart body for a case almost nothing sends.
+
+**Refusal by shape, before touching the disk** — traversal in any spelling,
+absolute names, drive letters, backslashes, doubled separators, null bytes and
+dotfiles. An unknown extension is `application/octet-stream` and never
+`text/html`, because a browser told something is HTML will run the script in it.
+
+## Templates are cached
+
+A page used to mean reading three files and tokenising all of them on every
+request, and that alone halved throughput against a route returning plain
+text. Templates are now parsed once and kept, keyed by path and validated
+against the file's modification time — which is why `nil.std.io` grew
+`modified_at`: without it a cache cannot tell whether what it holds is current
+except by re-reading the file, which is the thing the cache exists to avoid.
+
+Serving freezes the cache, so a page costs no filesystem call at all. Set
+`NILWEB_RELOAD=1` to leave it thawed while editing templates.
 
 ## Differences from NyWeb
 
@@ -181,7 +259,7 @@ src/nilweb/template/render.matrix    the .nilhtml engine
 src/nilweb/session/session.matrix    sessions and their cookie
 src/nilweb/static/files.matrix       serving a directory
 src/nilweb/middleware/chain.matrix   guards and finishers
-src/nilweb/server/listener.matrix    binding, accepting, request framing
+src/nilweb/server/engine.matrix      the event loop
 src/main.matrix                      a demonstration, and the `answer` entry point
 web/                                 the demonstration's templates and assets
 tests/run-tests.matrix               every suite

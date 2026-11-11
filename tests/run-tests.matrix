@@ -19,7 +19,7 @@ read everything from nilweb.template.render
 read everything from nilweb.session.session
 read everything from nilweb.static.files
 read everything from nilweb.middleware.chain
-read everything from nilweb.server.listener
+read everything from nilweb.server.engine
 
 scan-tests returns nothing begin paragraph
     evaluate section with title being "nilweb.text.scan"
@@ -505,6 +505,65 @@ template-tests returns nothing begin paragraph
 
     evaluate is-true with label being "a template that includes itself is stopped",
         actual being not (render-file with name being "cycle.nilhtml", page-data being page, root being "tests/templates").rendered
+
+    !!! The cache. A page that renders the same the second time is the whole
+    !!! requirement; the rest is that it is actually being cached and that an
+    !!! edited template is still noticed.
+    evaluate clear-cache with nothing
+    evaluate same-number with label being "the cache starts empty", actual being (cached-count with nothing), expected being 0
+    value first-pass is render-file with name being "page.nilhtml", page-data being page, root being "tests/templates"
+    evaluate is-true with label being "the first render succeeds", actual being first-pass.rendered
+    evaluate same-number with label being "a page with a layout and an include caches three templates",
+        actual being (cached-count with nothing), expected being 3
+    value second-pass is render-file with name being "page.nilhtml", page-data being page, root being "tests/templates"
+    evaluate same-text with label being "a cached render is identical to the first",
+        actual being second-pass.text-out, expected being first-pass.text-out
+    evaluate same-number with label being "rendering again caches nothing new",
+        actual being (cached-count with nothing), expected being 3
+
+    !!! Frozen, the cache is trusted without a timestamp check. The output
+    !!! must not change, which is what says the frozen path renders from the
+    !!! same tokens rather than a different route through the engine.
+    evaluate freeze-cache with frozen being true
+    value frozen-pass is render-file with name being "page.nilhtml", page-data being page, root being "tests/templates"
+    evaluate same-text with label being "a frozen cache renders the same",
+        actual being frozen-pass.text-out, expected being first-pass.text-out
+    evaluate freeze-cache with frozen being false
+
+    !!! A refused name is refused before it reaches the cache, so a traversal
+    !!! attempt cannot plant an entry under a path outside the root.
+    evaluate is-true with label being "a climbing name is refused by prepare",
+        actual being not (prepare with name being "../outside-root.txt", root being "tests/templates").ready
+    evaluate same-number with label being "a refused name caches nothing",
+        actual being (cached-count with nothing), expected being 3
+
+    !!! A layout may hold its own blocks. Rendering the layout token by token
+    !!! around the slot was the first implementation and it broke exactly
+    !!! this: an `if` spans several tokens, and one of them alone has no `end`.
+    variable blocky is empty-context with nothing
+    set blocky to with-value with page-data being blocky, name being "heading", content being "Body"
+    set blocky to with-value with page-data being blocky, name being "who", content being "Ada"
+    set blocky to with-flag with page-data being blocky, name being "signed-in", held being true
+    variable trail is no-rows with nothing
+    set trail to add-row with rows being trail,
+        one-row being (row-with with one-row being (new-row with nothing), name being "name", content being "home")
+    set trail to add-row with rows being trail,
+        one-row being (row-with with one-row being (new-row with nothing), name being "name", content being "posts")
+    set blocky to with-rows with page-data being blocky, name being "trail", rows being trail
+
+    value wrapped is render-file with name being "blocky-page.nilhtml", page-data being blocky, root being "tests/templates"
+    evaluate is-true with label being "a layout with its own blocks renders", actual being wrapped.rendered
+    evaluate is-true with label being "a conditional in a layout takes its branch",
+        actual being (nil.std.text::contains with s being wrapped.text-out, needle being "Hello Ada")
+    evaluate is-true with label being "a conditional in a layout skips the other branch",
+        actual being not (nil.std.text::contains with s being wrapped.text-out, needle being "Sign in")
+    evaluate is-true with label being "the page lands inside the layout",
+        actual being (nil.std.text::contains with s being wrapped.text-out, needle being "<p>Body</p>")
+    evaluate is-true with label being "a loop after the slot renders",
+        actual being (nil.std.text::contains with s being wrapped.text-out, needle being "[home][posts]")
+
+    evaluate is-true with label being "a layout with no content slot is reported, not silently blank",
+        actual being not (render-file with name being "slotless.nilhtml", page-data being blocky, root being "tests/templates").rendered
     give nothing
 end paragraph
 
@@ -675,6 +734,114 @@ static-tests returns nothing begin paragraph
     evaluate is-true with label being "a 404 is never given a cache lifetime",
         actual being ((field-value with fields being (serve-cached with root being "tests/public",
             path being "/nope.css", seconds being 60).fields, name being "Cache-Control")) equals ""
+
+    !!! Validators: size and timestamp, without reading the file.
+    value marks is validators-of with root being "tests/public", path being "/assets/app.css"
+    evaluate is-true with label being "a present file has validators", actual being marks.found
+    evaluate same-number with label being "the width matches the file", actual being marks.width, expected being 31
+    evaluate is-true with label being "the timestamp is a plausible epoch", actual being marks.stamped-at is greater than 1577836800000
+    evaluate is-true with label being "the tag is quoted", actual being (nil.std.text::starts_with with s being marks.tag, prefix being quote)
+    evaluate is-true with label being "an absent file has no validators",
+        actual being not (validators-of with root being "tests/public", path being "/nope.css").found
+    evaluate is-true with label being "a climbing name has no validators",
+        actual being not (validators-of with root being "tests/public", path being "/../outside-root.txt").found
+
+    !!! Revalidation. A client holding the current tag is told to keep it.
+    value plain-get is make-request with verb being request-method.Get, target being "/assets/app.css",
+        fields being (no-headers with nothing), body being ""
+    value first-serve is serve-revalidated with root being "tests/public", path being "/assets/app.css",
+        request being plain-get, seconds being 3600
+    evaluate same-number with label being "a request with no validator gets the file", actual being first-serve.code, expected being 200
+    evaluate same-text with label being "the response carries its tag",
+        actual being (field-value with fields being first-serve.fields, name being "ETag"), expected being marks.tag
+
+    value matching is make-request with verb being request-method.Get, target being "/assets/app.css",
+        fields being (set-field with fields being (no-headers with nothing), name being "If-None-Match", content being marks.tag),
+        body being ""
+    value revalidated is serve-revalidated with root being "tests/public", path being "/assets/app.css",
+        request being matching, seconds being 3600
+    evaluate same-number with label being "a current copy is answered 304", actual being revalidated.code, expected being 304
+    evaluate same-text with label being "a 304 sends no body", actual being revalidated.body, expected being ""
+    evaluate is-true with label being "a 304 carries no Content-Length",
+        actual being not (nil.std.text::contains with s being (render-for-get with response being revalidated), needle being "Content-Length")
+    evaluate is-true with label being "a 304 carries no Content-Type",
+        actual being not (has-field with fields being revalidated.fields, name being "Content-Type")
+
+    value star is make-request with verb being request-method.Get, target being "/assets/app.css",
+        fields being (set-field with fields being (no-headers with nothing), name being "If-None-Match", content being "*"),
+        body being ""
+    evaluate same-number with label being "a star validator matches anything present",
+        actual being (serve-revalidated with root being "tests/public", path being "/assets/app.css",
+            request being star, seconds being 60).code, expected being 304
+
+    value stale is make-request with verb being request-method.Get, target being "/assets/app.css",
+        fields being (set-field with fields being (no-headers with nothing), name being "If-None-Match",
+            content being quote plus "something-else" plus quote),
+        body being ""
+    evaluate same-number with label being "a stale validator gets the file",
+        actual being (serve-revalidated with root being "tests/public", path being "/assets/app.css",
+            request being stale, seconds being 60).code, expected being 200
+
+    value weak is make-request with verb being request-method.Get, target being "/assets/app.css",
+        fields being (set-field with fields being (no-headers with nothing), name being "If-None-Match",
+            content being "W/" plus marks.tag),
+        body being ""
+    evaluate same-number with label being "a weak prefix on a known tag still matches",
+        actual being (serve-revalidated with root being "tests/public", path being "/assets/app.css",
+            request being weak, seconds being 60).code, expected being 304
+
+    !!! Ranges.
+    evaluate is-true with label being "no Range header means no range asked",
+        actual being not (range-of with stated being "", width being 100).present
+    evaluate is-true with label being "an unknown unit is ignored, not refused",
+        actual being not (range-of with stated being "items=0-10", width being 100).present
+    value first-ten is range-of with stated being "bytes=0-9", width being 100
+    evaluate same-number with label being "a range reads its first byte", actual being first-ten.first-byte, expected being 0
+    evaluate same-number with label being "a range reads its last byte", actual being first-ten.last-byte, expected being 9
+    value open-ended is range-of with stated being "bytes=90-", width being 100
+    evaluate same-number with label being "an open-ended range runs to the end", actual being open-ended.last-byte, expected being 99
+    value suffix is range-of with stated being "bytes=-10", width being 100
+    evaluate same-number with label being "a suffix range starts from the end", actual being suffix.first-byte, expected being 90
+    value over-long is range-of with stated being "bytes=-500", width being 100
+    evaluate same-number with label being "a suffix longer than the file is the whole file",
+        actual being over-long.first-byte, expected being 0
+    value clipped is range-of with stated being "bytes=50-500", width being 100
+    evaluate same-number with label being "a range past the end is clipped", actual being clipped.last-byte, expected being 99
+    evaluate is-true with label being "a first byte past the end is unsatisfiable",
+        actual being not (range-of with stated being "bytes=100-120", width being 100).satisfiable
+    evaluate is-true with label being "a backwards range is unsatisfiable",
+        actual being not (range-of with stated being "bytes=50-20", width being 100).satisfiable
+    evaluate is-true with label being "nonsense in a range is unsatisfiable",
+        actual being not (range-of with stated being "bytes=abc-def", width being 100).satisfiable
+    evaluate is-true with label being "a multi-range request falls back to the whole file",
+        actual being not (range-of with stated being "bytes=0-9,20-29", width being 100).present
+
+    value ranged-request is make-request with verb being request-method.Get, target being "/assets/app.css",
+        fields being (set-field with fields being (no-headers with nothing), name being "Range", content being "bytes=0-5"),
+        body being ""
+    value partial is serve-static with root being "tests/public", path being "/assets/app.css",
+        request being ranged-request, seconds being 60
+    evaluate same-number with label being "a satisfiable range is answered 206", actual being partial.code, expected being 206
+    evaluate same-number with label being "a range response holds just those bytes",
+        actual being (nil.std.text::length with s being partial.body), expected being 6
+    evaluate same-text with label being "a range response says which bytes",
+        actual being (field-value with fields being partial.fields, name being "Content-Range"), expected being "bytes 0-5/31"
+    evaluate same-text with label being "a range response advertises ranges",
+        actual being (field-value with fields being partial.fields, name being "Accept-Ranges"), expected being "bytes"
+
+    value bad-range is make-request with verb being request-method.Get, target being "/assets/app.css",
+        fields being (set-field with fields being (no-headers with nothing), name being "Range", content being "bytes=9999-"),
+        body being ""
+    value refused-range is serve-static with root being "tests/public", path being "/assets/app.css",
+        request being bad-range, seconds being 60
+    evaluate same-number with label being "an unsatisfiable range is answered 416", actual being refused-range.code, expected being 416
+    evaluate same-text with label being "a 416 names the real length",
+        actual being (field-value with fields being refused-range.fields, name being "Content-Range"), expected being "bytes */31"
+
+    evaluate same-text with label being "a full response advertises ranges",
+        actual being (field-value with fields being (serve-static with root being "tests/public",
+            path being "/assets/app.css", request being plain-get, seconds being 60).fields,
+            name being "Accept-Ranges"), expected being "bytes"
     give nothing
 end paragraph
 
@@ -735,7 +902,7 @@ middleware-tests returns nothing begin paragraph
 end paragraph
 
 listener-tests returns nothing begin paragraph
-    evaluate section with title being "nilweb.server.listener"
+    evaluate section with title being "nilweb.server.engine"
     !!! The framing decision, tested without a socket: how the loop knows a
     !!! request has fully arrived. Getting this wrong means either answering
     !!! half a request or waiting forever for a body that was never coming.
@@ -778,20 +945,42 @@ listener-tests returns nothing begin paragraph
 
     !!! Binding is refused rather than raised, and the refusal says why. Port
     !!! zero is rejected by the intrinsic, so this needs no free port.
-    value refused is bind-server with host being "127.0.0.1", port being 0
-    evaluate is-true with label being "an impossible port does not bind", actual being not refused.listening
+    value refused is start-engine with host being "127.0.0.1", port being 0, limit being 8
+    evaluate is-true with label being "an impossible port does not bind", actual being not refused.live
     evaluate is-true with label being "a refusal to bind says why", actual being not (refused.complaint equals "")
-    value named is bind-server with host being "example.com", port being 8080
-    evaluate is-true with label being "binding does not resolve a name", actual being not named.listening
+    value named is start-engine with host being "example.com", port being 8080, limit being 8
+    evaluate is-true with label being "binding does not resolve a name", actual being not named.live
 
     !!! A real bind, so the happy path is covered too, then released.
-    value bound is bind-server with host being "127.0.0.1", port being 18731
-    evaluate is-true with label being "a free loopback port binds", actual being bound.listening
+    variable bound is start-engine with host being "127.0.0.1", port being 18731, limit being 8
+    evaluate is-true with label being "a free loopback port binds", actual being bound.live
     evaluate same-text with label being "a successful bind has no complaint", actual being bound.complaint, expected being ""
-    evaluate stop-server with server being bound
-    value again-bound is bind-server with host being "127.0.0.1", port being 18731
-    evaluate is-true with label being "the port is free again after stopping", actual being again-bound.listening
-    evaluate stop-server with server being again-bound
+    evaluate same-number with label being "a fresh engine holds no connections", actual being bound.open-count, expected being 0
+    evaluate same-number with label being "a fresh engine has served nothing", actual being bound.served-total, expected being 0
+    value idle-pass is pump with server being bound, timeout being 10
+    evaluate is-true with label being "a pass with nothing happening finds nothing", actual being not idle-pass.found
+    evaluate same-number with label being "sweeping an empty engine closes nothing",
+        actual being (sweep-idle with server being bound), expected being 0
+    evaluate stop-engine with server being bound
+    evaluate is-true with label being "a stopped engine is not live", actual being not bound.live
+    variable again-bound is start-engine with host being "127.0.0.1", port being 18731, limit being 8
+    evaluate is-true with label being "the port is free again after stopping", actual being again-bound.live
+    evaluate stop-engine with server being again-bound
+
+    !!! Keep-alive: 1.1 keeps unless told to close, 1.0 closes unless told to keep.
+    evaluate is-true with label being "HTTP/1.1 keeps the connection by default",
+        actual being (wants-keep-alive with message being "GET / HTTP/1.1" plus (crlf with nothing) plus "Host: x" plus marker)
+    evaluate is-true with label being "HTTP/1.1 honours Connection: close",
+        actual being not (wants-keep-alive with message being "GET / HTTP/1.1" plus (crlf with nothing)
+            plus "Connection: close" plus marker)
+    evaluate is-true with label being "HTTP/1.0 closes by default",
+        actual being not (wants-keep-alive with message being "GET / HTTP/1.0" plus (crlf with nothing) plus "Host: x" plus marker)
+    evaluate is-true with label being "HTTP/1.0 honours Connection: keep-alive",
+        actual being (wants-keep-alive with message being "GET / HTTP/1.0" plus (crlf with nothing)
+            plus "Connection: keep-alive" plus marker)
+    evaluate is-true with label being "the Connection field folds case",
+        actual being not (wants-keep-alive with message being "GET / HTTP/1.1" plus (crlf with nothing)
+            plus "connection: Close" plus marker)
     give nothing
 end paragraph
 

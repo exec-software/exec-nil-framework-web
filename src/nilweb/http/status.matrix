@@ -14,6 +14,7 @@ public constant status-ok as number is 200
 public constant status-created as number is 201
 public constant status-accepted as number is 202
 public constant status-no-content as number is 204
+public constant status-partial-content as number is 206
 public constant status-moved-permanently as number is 301
 public constant status-found as number is 302
 public constant status-see-other as number is 303
@@ -31,6 +32,7 @@ public constant status-conflict as number is 409
 public constant status-payload-too-large as number is 413
 public constant status-uri-too-long as number is 414
 public constant status-unsupported-media-type as number is 415
+public constant status-range-not-satisfiable as number is 416
 public constant status-unprocessable as number is 422
 public constant status-too-many-requests as number is 429
 public constant status-internal-error as number is 500
@@ -53,6 +55,7 @@ public reason-phrase receives code as number returns text begin paragraph
         case 201 then stop switching with "Created"
         case 202 then stop switching with "Accepted"
         case 204 then stop switching with "No Content"
+        case 206 then stop switching with "Partial Content"
         case 301 then stop switching with "Moved Permanently"
         case 302 then stop switching with "Found"
         case 303 then stop switching with "See Other"
@@ -70,6 +73,7 @@ public reason-phrase receives code as number returns text begin paragraph
         case 413 then stop switching with "Payload Too Large"
         case 414 then stop switching with "URI Too Long"
         case 415 then stop switching with "Unsupported Media Type"
+        case 416 then stop switching with "Range Not Satisfiable"
         case 422 then stop switching with "Unprocessable Content"
         case 429 then stop switching with "Too Many Requests"
         case 500 then stop switching with "Internal Server Error"

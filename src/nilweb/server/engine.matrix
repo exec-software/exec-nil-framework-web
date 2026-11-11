@@ -1,0 +1,674 @@
+!!! The event loop.
+!!!
+!!! This replaces an accept-serve-close loop that handled one connection at a
+!!! time. That shape is a development server: one client pausing mid-request
+!!! stops every other client until it finishes or times out, and no amount of
+!!! tuning changes it.
+!!!
+!!! What is here instead is nginx's shape rather than Apache's prefork, for a
+!!! reason that is not a preference. The interpreter holds one stack, one heap
+!!! and one set of globals, with no lock anywhere near them, and
+!!! nil.std.threading offers `sleep`. A thread per connection is not available
+!!! and will not be until the runtime is a different runtime. An event loop
+!!! does not need one: poll says which sockets can be acted on, and one pass
+!!! round the loop acts on each in turn.
+!!!
+!!! For more than one core, run more than one process over the same port --
+!!! `share-port` below -- and let the kernel balance accepts between them.
+!!!
+!!! The application still owns dispatch. `pump` hands back one framed request
+!!! at a time and `reply` takes the answer, so the routing, templates and
+!!! sessions above are reached by the application's own paragraph. Matrix has
+!!! no capturing closures, so a callback is not something this module could
+!!! hold even if that were the nicer design.
+!!!
+!!! The engine is mutated in place. A record parameter in Matrix is a shared
+!!! handle, and an array inside a record can be appended to and assigned
+!!! element-wise, so holding a thousand connections costs a thousand slots
+!!! rather than a copy of the whole table per event.
+
+book nilweb.server.engine
+
+read nil.std.core
+read nil.std.net.socket
+read nil.std.text
+read nil.std.text.string_utils
+read everything from nilweb.text.scan
+read everything from nilweb.http.headers
+
+
+!!! How long a connection may sit idle before it is closed.
+!!!
+!!! Two numbers, because the two risks differ. A connection that has sent
+!!! nothing at all is probably a scan or a speculative socket a browser opened
+!!! and forgot, and is worth little patience. One that is between requests on
+!!! a keep-alive session is a real client thinking, and closing it early costs
+!!! a handshake.
+constant first-request-limit-ms as number is 10000
+constant between-requests-limit-ms as number is 30000
+
+!!! A request that arrives in pieces must finish within this, however slowly
+!!! the pieces come. Without it, a client that sends one byte a second holds a
+!!! slot indefinitely -- which is what slowloris is.
+constant request-deadline-ms as number is 20000
+
+!!! The most a request may be, header and body together. The cap stops the
+!!! reading rather than rejecting afterwards.
+constant request-limit as number is 1048576
+
+!!! One read per pass. Large enough that an ordinary request arrives whole.
+constant chunk-size as number is 65536
+
+!!! How many requests one connection may serve before it is closed anyway.
+!!! Not a safety limit -- a bound on how long any single connection can hold
+!!! whatever it has accumulated, so a long-lived client cannot pin a slot for
+!!! the life of the process.
+constant keep-alive-limit as number is 1000
+
+
+public connection begin record
+    field handle as number
+    !!! Request bytes read so far, waiting to be framed.
+    field gathered as text
+    !!! Response bytes not yet accepted by the socket.
+    field outgoing as text
+    !!! How much of `outgoing` has gone.
+    field sent as number
+    !!! Requests completed on this connection.
+    field served as number
+    field live as boolean
+    !!! Whether to keep the connection after the response in flight.
+    field keeping as boolean
+    !!! When the current request started arriving, and when anything last did.
+    field started-at as number
+    field touched-at as number
+end record
+
+
+public engine begin record
+    field listener as number
+    field live as boolean
+    field complaint as text
+    field connections as array of connection
+    field open-count as number
+    field accepted-total as number
+    field served-total as number
+    field rejected-total as number
+    field connection-limit as number
+end record
+
+
+!!! --- What one call to `pump` found.
+
+public pumped begin record
+    field found as boolean
+    field handle as number
+    field request as text
+    !!! Whether the client asked to keep the connection open.
+    field keep-alive as boolean
+end record
+
+
+nothing-found returns pumped begin paragraph
+    give build pumped with found being false, handle being 0, request being "", keep-alive being false
+end paragraph
+
+
+!!! --- Bind a port and prepare to serve.
+!!!
+!!! `limit` is how many connections may be open at once. A ceiling rather than
+!!! none, because every open connection holds its accumulated request text,
+!!! and a server that accepts without limit is a server that can be asked to
+!!! hold more than it has memory for.
+
+public start-engine receives host as text, port as number, limit as number returns engine begin paragraph
+    variable connections as array of connection is []
+    value opened is nil.std.net::listen with host being host, port being port, backlog being 512
+    consider opened
+        when Result.Error holding why then
+            give build engine with listener being 0, live being false, complaint being why,
+                connections being connections, open-count being 0, accepted-total being 0,
+                served-total being 0, rejected-total being 0, connection-limit being limit
+        when Result.Ok holding handle then begin block
+            !!! The listener does not block: poll has already said a connection
+            !!! is pending, and a blocking accept that then found none --
+            !!! because the peer withdrew in between -- would stop the loop on
+            !!! behalf of one socket.
+            evaluate nil.std.net::set_blocking with handle being handle, blocking being false
+            evaluate nil.std.net::watch with handle being handle, flags being nil.std.net::ready_readable
+            give build engine with listener being handle, live being true, complaint being "",
+                connections being connections, open-count being 0, accepted-total being 0,
+                served-total being 0, rejected-total being 0, connection-limit being limit
+        end block
+        otherwise
+            give build engine with listener being 0, live being false,
+                complaint being "the port could not be bound", connections being connections,
+                open-count being 0, accepted-total being 0, served-total being 0,
+                rejected-total being 0, connection-limit being limit
+    end consider
+end paragraph
+
+
+!!! --- Let other processes bind the same port, for running on more than one
+!!! core. Opt-in, because switched on by accident it would split traffic with
+!!! a stray server rather than failing to start.
+
+public share-port receives server as engine returns boolean begin paragraph
+    when not server.live then
+        give false
+    end when
+    value outcome is nil.std.net::set_reuse_port with handle being server.listener, enabled being true
+    consider outcome
+        when Result.Ok holding amount then give true
+        otherwise give false
+    end consider
+end paragraph
+
+
+public stop-engine receives server as engine returns nothing begin paragraph
+    repeat for each held in server.connections
+        when held.live then
+            evaluate nil.std.net::unwatch with handle being held.handle
+            evaluate nil.std.net::close with handle being held.handle
+        end when
+    end repeat
+    when server.live then
+        evaluate nil.std.net::unwatch with handle being server.listener
+        evaluate nil.std.net::close with handle being server.listener
+    end when
+    set server.live to false
+    give nothing
+end paragraph
+
+
+!!! --- One pass: wait for readiness, act on everything ready, and hand back
+!!! the first framed request found.
+!!!
+!!! A pass may frame several requests. Only one is returned, and the rest stay
+!!! in their connections' buffers to be found by the next call -- which is why
+!!! `pump` checks for an already-framed request before it waits at all. The
+!!! alternative, returning a list, would be an array crossing back and forth
+!!! for no gain.
+
+public pump receives server as engine, timeout as number returns pumped begin paragraph
+    when not server.live then
+        give nothing-found with nothing
+    end when
+
+    !!! Something framed on an earlier pass and not yet handed over.
+    value already is first-framed with server being server
+    when already.found then
+        give already
+    end when
+
+    value counted is nil.std.net::wait with timeout_milliseconds being timeout
+    consider counted
+        when Result.Error holding why then begin block
+            set server.complaint to why
+            give nothing-found with nothing
+        end block
+        otherwise set server.complaint to ""
+    end consider
+
+    variable draining as boolean is true
+    repeat while draining
+        value packed is nil.std.net::next_ready with nothing
+        consider packed
+            when Result.Ok holding ready then begin block
+                when ready equals 0 then
+                    set draining to false
+                end when
+                when ready is greater than 0 then
+                    evaluate act-on with server being server, ready being ready
+                end when
+            end block
+            otherwise set draining to false
+        end consider
+    end repeat
+
+    give first-framed with server being server
+end paragraph
+
+
+act-on receives server as engine, ready as number returns nothing begin paragraph
+    value handle is nil.std.net::ready_handle with packed being ready
+    when handle equals server.listener then
+        evaluate take-connections with server being server
+        give nothing
+    end when
+
+    value slot is slot-of with server being server, handle being handle
+    when slot is less than 0 then
+        !!! Readiness for a connection this engine no longer tracks. Unwatch
+        !!! rather than guess: the handle may since have been reissued.
+        evaluate nil.std.net::unwatch with handle being handle
+        give nothing
+    end when
+
+    when nil.std.net::is_writable with packed being ready then
+        evaluate push-outgoing with server being server, slot being slot
+    end when
+    !!! Readable and finished can both be set: a peer that hung up may still
+    !!! have sent something, and that something is read before the connection
+    !!! is dropped or the last request of a session is lost.
+    when nil.std.net::is_readable with packed being ready then
+        evaluate pull-incoming with server being server, slot being slot
+    end when
+    when nil.std.net::is_finished with packed being ready then
+        value held is server.connections at slot
+        when held.live and (nil.std.text::length with s being held.outgoing) equals held.sent then
+            evaluate drop with server being server, slot being slot
+        end when
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- Accept until the listener says there is nothing pending.
+!!!
+!!! Poll reports a listener readable once however many connections are
+!!! waiting, so a loop that accepted one per pass would fall behind under load
+!!! and never catch up.
+
+take-connections receives server as engine returns nothing begin paragraph
+    variable accepting as boolean is true
+    repeat while accepting
+        value taken is nil.std.net::accept with handle being server.listener
+        consider taken
+            when Result.Ok holding client then begin block
+                when client equals 0 then
+                    set accepting to false
+                end when
+                when client is greater than 0 then
+                    evaluate admit with server being server, client being client
+                end when
+            end block
+            when Result.Error holding why then begin block
+                set server.complaint to why
+                set accepting to false
+            end block
+            otherwise set accepting to false
+        end consider
+    end repeat
+    give nothing
+end paragraph
+
+
+admit receives server as engine, client as number returns nothing begin paragraph
+    set server.accepted-total to server.accepted-total plus 1
+    when server.open-count is at least server.connection-limit then
+        !!! At the ceiling. Closed immediately rather than queued: a queue
+        !!! here is memory held on behalf of a client that is already being
+        !!! refused, and a refusal it can see is better than a stall it cannot.
+        set server.rejected-total to server.rejected-total plus 1
+        evaluate nil.std.net::close with handle being client
+        give nothing
+    end when
+
+    !!! Non-blocking, so neither a slow sender nor a slow reader can hold the
+    !!! loop. Reads go through receive, which tells "nothing yet" apart from
+    !!! "the peer closed"; writes go out through send_some as the socket takes
+    !!! them.
+    evaluate nil.std.net::set_blocking with handle being client, blocking being false
+    evaluate nil.std.net::set_no_delay with handle being client, enabled being true
+    evaluate nil.std.net::watch with handle being client, flags being nil.std.net::ready_readable
+
+    value now-at is now in milliseconds
+    value free-slot is dead-slot-of with server being server
+    value fresh is build connection with handle being client, gathered being "", outgoing being "",
+        sent being 0, served being 0, live being true, keeping being true,
+        started-at being now-at, touched-at being now-at
+    when free-slot is at least 0 then
+        set server.connections at free-slot to fresh
+    otherwise
+        append fresh to server.connections
+    end when
+    set server.open-count to server.open-count plus 1
+    give nothing
+end paragraph
+
+
+pull-incoming receives server as engine, slot as number returns nothing begin paragraph
+    value held is server.connections at slot
+    when not held.live then
+        give nothing
+    end when
+
+    value counted is nil.std.net::receive with handle being held.handle, maximum_bytes being chunk-size
+    consider counted
+        when Result.Error holding why then begin block
+            evaluate drop with server being server, slot being slot
+            give nothing
+        end block
+        when Result.Ok holding amount then begin block
+            !!! Minus one is "nothing yet" -- a spurious wakeup, or a peer
+            !!! that stopped mid-send. Not a close, and dropping the
+            !!! connection here is the bug this distinction exists to prevent.
+            when amount is less than 0 then
+                give nothing
+            end when
+            when amount equals 0 then
+                evaluate drop with server being server, slot being slot
+                give nothing
+            end when
+            value arrived is nil.std.net::received with nothing
+            consider arrived
+                when Result.Ok holding piece then
+                    evaluate absorb with server being server, slot being slot, piece being piece
+                otherwise
+                    evaluate drop with server being server, slot being slot
+            end consider
+        end block
+        otherwise evaluate drop with server being server, slot being slot
+    end consider
+    give nothing
+end paragraph
+
+
+absorb receives server as engine, slot as number, piece as text returns nothing begin paragraph
+    value held is server.connections at slot
+    value whole is held.gathered plus piece
+    value now-at is now in milliseconds
+    when (nil.std.text::length with s being whole) is greater than request-limit then
+        !!! Refused by closing rather than by answering 413: the request is
+        !!! still arriving, and a response written into a stream the client is
+        !!! still filling is a response it may never read.
+        evaluate drop with server being server, slot being slot
+        give nothing
+    end when
+    set server.connections at slot to build connection with handle being held.handle,
+        gathered being whole, outgoing being held.outgoing, sent being held.sent,
+        served being held.served, live being true, keeping being held.keeping,
+        started-at being held.started-at, touched-at being now-at
+    give nothing
+end paragraph
+
+
+!!! --- The first connection holding a complete request.
+
+first-framed receives server as engine returns pumped begin paragraph
+    variable index as number is 0
+    repeat while index is less than the length of server.connections
+        value held is server.connections at index
+        value waiting is held.live and (nil.std.text::length with s being held.outgoing) equals held.sent
+        when waiting and not (held.gathered equals "") then
+            when request-is-complete with message being held.gathered then
+                give build pumped with found being true, handle being held.handle,
+                    request being held.gathered,
+                    keep-alive being (wants-keep-alive with message being held.gathered)
+            end when
+        end when
+        set index to index plus 1
+    end repeat
+    give nothing-found with nothing
+end paragraph
+
+
+!!! --- Answer a request and either keep the connection or close it.
+!!!
+!!! The response is handed over whole and sent as the socket takes it. A
+!!! client that reads slowly holds its own buffer and nobody else's.
+
+public reply receives server as engine, handle as number, response as text, keep-open as boolean
+    returns nothing begin paragraph
+    value slot is slot-of with server being server, handle being handle
+    when slot is less than 0 then
+        give nothing
+    end when
+    value held is server.connections at slot
+    value now-at is now in milliseconds
+    value more-allowed is held.served plus 1 is less than keep-alive-limit
+    set server.connections at slot to build connection with handle being handle,
+        gathered being "", outgoing being response, sent being 0,
+        served being held.served plus 1, live being true,
+        keeping being keep-open and more-allowed,
+        started-at being now-at, touched-at being now-at
+    set server.served-total to server.served-total plus 1
+    evaluate push-outgoing with server being server, slot being slot
+    give nothing
+end paragraph
+
+
+!!! --- Send what the socket will take, and decide what happens next.
+
+push-outgoing receives server as engine, slot as number returns nothing begin paragraph
+    value held is server.connections at slot
+    when not held.live then
+        give nothing
+    end when
+    value width is nil.std.text::length with s being held.outgoing
+    when width equals held.sent then
+        give nothing
+    end when
+
+    value sent is nil.std.net::send_some with handle being held.handle,
+        data being held.outgoing, offset being held.sent
+    consider sent
+        when Result.Error holding why then begin block
+            !!! The peer left before its answer arrived. An ordinary Tuesday,
+            !!! not an error in the program.
+            evaluate drop with server being server, slot being slot
+            give nothing
+        end block
+        when Result.Ok holding amount then begin block
+            value moved is when amount is less than 0 give 0 otherwise give amount end when
+            value now-sent is held.sent plus moved
+            value now-at is now in milliseconds
+            set server.connections at slot to build connection with handle being held.handle,
+                gathered being held.gathered, outgoing being held.outgoing, sent being now-sent,
+                served being held.served, live being true, keeping being held.keeping,
+                started-at being held.started-at, touched-at being now-at
+            when now-sent is less than width then
+                !!! More to go. Watch for writability so the next pass carries
+                !!! on, rather than spinning on a socket that is full.
+                evaluate nil.std.net::watch with handle being held.handle,
+                    flags being nil.std.net::ready_writable
+                give nothing
+            end when
+            evaluate finish-response with server being server, slot being slot
+        end block
+        otherwise evaluate drop with server being server, slot being slot
+    end consider
+    give nothing
+end paragraph
+
+
+finish-response receives server as engine, slot as number returns nothing begin paragraph
+    value held is server.connections at slot
+    when not held.keeping then
+        evaluate drop with server being server, slot being slot
+        give nothing
+    end when
+    !!! Kept open for another request: clear the response, read again.
+    value now-at is now in milliseconds
+    set server.connections at slot to build connection with handle being held.handle,
+        gathered being "", outgoing being "", sent being 0, served being held.served,
+        live being true, keeping being true, started-at being now-at, touched-at being now-at
+    evaluate nil.std.net::watch with handle being held.handle, flags being nil.std.net::ready_readable
+    give nothing
+end paragraph
+
+
+drop receives server as engine, slot as number returns nothing begin paragraph
+    value held is server.connections at slot
+    when not held.live then
+        give nothing
+    end when
+    evaluate nil.std.net::unwatch with handle being held.handle
+    evaluate nil.std.net::close with handle being held.handle
+    set server.connections at slot to build connection with handle being 0, gathered being "",
+        outgoing being "", sent being 0, served being 0, live being false, keeping being false,
+        started-at being 0, touched-at being 0
+    set server.open-count to server.open-count minus 1
+    give nothing
+end paragraph
+
+
+!!! --- Close connections that have stopped making progress.
+!!!
+!!! Called by the application between passes. Three deadlines, because the
+!!! three cases differ: a connection that has said nothing is probably a scan,
+!!! one that is mid-request may be slowloris, and one between keep-alive
+!!! requests is a real client thinking. Gives back how many were closed.
+
+public sweep-idle receives server as engine returns number begin paragraph
+    value now-at is now in milliseconds
+    variable closed as number is 0
+    variable index as number is 0
+    repeat while index is less than the length of server.connections
+        value held is server.connections at index
+        when held.live then
+            value quiet-for is now-at minus held.touched-at
+            value arriving-for is now-at minus held.started-at
+            value nothing-yet is held.gathered equals "" and held.served equals 0
+            value mid-request is not (held.gathered equals "")
+            value over-first is nothing-yet and quiet-for is greater than first-request-limit-ms
+            value over-deadline is mid-request and arriving-for is greater than request-deadline-ms
+            value over-between is held.served is greater than 0 and held.gathered equals ""
+                and quiet-for is greater than between-requests-limit-ms
+            when over-first or over-deadline or over-between then
+                evaluate drop with server being server, slot being index
+                set closed to closed plus 1
+            end when
+        end when
+        set index to index plus 1
+    end repeat
+    give closed
+end paragraph
+
+
+!!! --- Whether the client asked to keep the connection.
+!!!
+!!! HTTP/1.1 keeps it unless Connection says close; HTTP/1.0 closes unless
+!!! Connection says keep-alive. Getting this backwards for 1.0 is how a
+!!! server ends up holding connections no client will ever use again.
+
+public wants-keep-alive receives message as text returns boolean begin paragraph
+    value head is head-of with message being message
+    value stated is nil.std.text::to_lower with s being
+        (field-in with head being head, name being "Connection")
+    value first-line is before-first with input being head, separator being newline
+    value old-version is nil.std.text::contains with s being first-line, needle being "HTTP/1.0"
+    when nil.std.text::contains with s being stated, needle being "close" then
+        give false
+    end when
+    when old-version then
+        give nil.std.text::contains with s being stated, needle being "keep-alive"
+    end when
+    give true
+end paragraph
+
+
+field-in receives head as text, name as text returns text begin paragraph
+    value lines is split-on with input being head, separator being newline
+    repeat for each line in lines
+        value trimmed is nil.std.text::trim with s being line
+        value found is nil.std.text::trim with s being (before-first with input being trimmed, separator being ":")
+        when same-folded with left being found, right being name then
+            give nil.std.text::trim with s being (after-first with input being trimmed, separator being ":")
+        end when
+    end repeat
+    give ""
+end paragraph
+
+
+head-of receives message as text returns text begin paragraph
+    value marker is (crlf with nothing) plus (crlf with nothing)
+    value cut is nil.std.text::index_of with s being message, needle being marker
+    when cut is at least 0 then
+        give nil.std.text::substring with s being message, start being 0, length being cut
+    end when
+    value loose is nil.std.text::index_of with s being message, needle being newline plus newline
+    when loose is at least 0 then
+        give nil.std.text::substring with s being message, start being 0, length being loose
+    end when
+    give message
+end paragraph
+
+
+!!! --- Whether enough of the message has arrived to answer it.
+!!!
+!!! The header section ends at the first blank line. After that a body is
+!!! expected only if Content-Length says so. Chunked transfer encoding is not
+!!! accepted, and a request asking for it is answered by the layer above
+!!! rather than waited on here.
+
+public request-is-complete receives message as text returns boolean begin paragraph
+    value marker is (crlf with nothing) plus (crlf with nothing)
+    variable head-length as number is nil.std.text::index_of with s being message, needle being marker
+    variable separator as number is 4
+    when head-length is less than 0 then
+        set head-length to nil.std.text::index_of with s being message, needle being newline plus newline
+        set separator to 2
+    end when
+    when head-length is less than 0 then
+        give false
+    end when
+
+    value head is nil.std.text::substring with s being message, start being 0, length being head-length
+    value declared is digits-value with digits being (field-in with head being head, name being "Content-Length")
+    when declared is at most 0 then
+        give true
+    end when
+    value body-start is head-length plus separator
+    give ((nil.std.text::length with s being message) minus body-start) is at least declared
+end paragraph
+
+
+!!! --- A decimal count, without borrowing a parser that raises on bad input.
+!!! Anything that is not all digits is zero: a Content-Length a client made up
+!!! must not be able to stop the server with a fault.
+
+digits-value receives digits as text returns number begin paragraph
+    value width is nil.std.text::length with s being digits
+    when width is less than 1 or width is greater than 18 then
+        give 0
+    end when
+    variable total as number is 0
+    variable index as number is 0
+    repeat while index is less than width
+        value code is nil.std.text::byte_at with s being digits, index being index
+        when code is less than 48 or code is greater than 57 then
+            give 0
+        end when
+        set total to (total times 10) plus (code minus 48)
+        set index to index plus 1
+    end repeat
+    give total
+end paragraph
+
+
+slot-of receives server as engine, handle as number returns number begin paragraph
+    variable index as number is 0
+    repeat while index is less than the length of server.connections
+        value held is server.connections at index
+        when held.live and held.handle equals handle then
+            give index
+        end when
+        set index to index plus 1
+    end repeat
+    give 0 minus 1
+end paragraph
+
+
+!!! --- A slot whose connection has closed, so the table is reused rather than
+!!! growing once per connection for the life of the process.
+
+dead-slot-of receives server as engine returns number begin paragraph
+    variable index as number is 0
+    repeat while index is less than the length of server.connections
+        when not (server.connections at index).live then
+            give index
+        end when
+        set index to index plus 1
+    end repeat
+    give 0 minus 1
+end paragraph
+
+
+!!! --- Where the server can be reached, for the line printed at startup.
+
+public address-text receives host as text, port as number returns text begin paragraph
+    value shown is when host equals "" give "0.0.0.0" otherwise give host end when
+    give "http://" plus shown plus ":" plus (port becomes text) plus "/"
+end paragraph
