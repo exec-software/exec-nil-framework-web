@@ -1,0 +1,2 @@
+<%@ layout "layouts/main.nilhtml" %><%@ include "partials/nav.nilhtml" %>
+<h1><%= heading %></h1>

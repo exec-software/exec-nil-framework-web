@@ -1,0 +1,5 @@
+<!doctype html>
+<title><%= title %></title>
+<body>
+<%@ content %>
+</body>

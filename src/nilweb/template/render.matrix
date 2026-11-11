@@ -1,0 +1,453 @@
+!!! The .nilhtml template engine.
+!!!
+!!! Tags are NyWeb's, because they are good tags and because anyone moving a
+!!! page over should not have to relearn them:
+!!!
+!!!   <%= name %>                 a value, HTML-escaped
+!!!   <%! name %>                 a value, raw — see the warning on raw-output
+!!!   <%# anything %>             a comment, dropped
+!!!   <% if name %> … <% end %>   a section, taken when the name is set
+!!!   <% if name %> … <% else %> … <% end %>
+!!!   <% unless name %> … <% end %>
+!!!   <% for one in many %> … <% end %>   repeats, binding one.field
+!!!   <%@ include "partial.nilhtml" %>
+!!!   <%@ layout "layouts/main.nilhtml" %>
+!!!   <%@ content %>              in a layout: where the page goes
+!!!
+!!! What the tags no longer hold is Ny code. NyWeb's engine parsed expressions
+!!! and the runtime evaluated them; here a tag names something the handler
+!!! published and nothing else. See nilweb.template.context for why that is a
+!!! feature rather than a shortfall.
+!!!
+!!! The source is tokenised once and rendered start-at the token array, rather
+!!! than rescanned for every nested block. A page with a loop inside a
+!!! conditional inside a layout would otherwise walk its own text four times.
+
+book nilweb.template.render
+
+read nil.std.io.file
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.template.context
+
+
+!!! How many includes and layouts deep a render may go before it is judged to
+!!! be a cycle. A page that legitimately nests ten layouts does not exist; a
+!!! partial that includes itself does, and without this it takes the process.
+constant nesting-limit as number is 10
+
+
+public template-token begin record
+    !!! literal, output, raw, comment, if, unless, else, ending, loop,
+    !!! include, layout, slot, broken
+    field kind as text
+    field body as text
+end record
+
+
+public render-result begin record
+    field text-out as text
+    field rendered as boolean
+    field complaint as text
+end record
+
+
+!!! --- Escape text for HTML content and double-quoted attributes.
+!!!
+!!! Five characters, in this order — ampersand first, or the escapes this
+!!! introduces are escaped again and `&lt;` reaches the page as `&amp;lt;`.
+!!! The apostrophe is included because an attribute may be single-quoted, and
+!!! a framework that only escaped the double quote would be one where the
+!!! difference between quote styles is a vulnerability.
+
+public escape-html receives raw as text returns text begin paragraph
+    variable out as text is raw
+    set out to nil.std.text::replace with s being out, old_value being "&", new_value being "&amp;"
+    set out to nil.std.text::replace with s being out, old_value being "<", new_value being "&lt;"
+    set out to nil.std.text::replace with s being out, old_value being ">", new_value being "&gt;"
+    set out to nil.std.text::replace with s being out, old_value being quote, new_value being "&quot;"
+    set out to nil.std.text::replace with s being out, old_value being "'", new_value being "&#39;"
+    give out
+end paragraph
+
+
+!!! --- Break a template into literal runs and tags.
+!!!
+!!! An unterminated `<%` is a `broken` token rather than a silent truncation,
+!!! so a missing `%>` is reported with the template rather than discovered as
+!!! a half-rendered page.
+
+public tokenize receives source as text returns array of template-token begin paragraph
+    variable tokens as array of template-token is []
+    variable rest as text is source
+    repeat forever
+        value opened is nil.std.text::index_of with s being rest, needle being "<%"
+        when opened is less than 0 then
+            when not (rest equals "") then
+                append build template-token with kind being "literal", body being rest to tokens
+            end when
+            stop repeating
+        end when
+        when opened is greater than 0 then
+            append build template-token with kind being "literal",
+                body being (nil.std.text::substring with s being rest, start being 0, length being opened) to tokens
+        end when
+        value after-open is nil.std.text::substring with s being rest, start being opened plus 2,
+            length being (nil.std.text::length with s being rest) minus opened minus 2
+        value closed is nil.std.text::index_of with s being after-open, needle being "%>"
+        when closed is less than 0 then
+            append build template-token with kind being "broken", body being after-open to tokens
+            stop repeating
+        end when
+        value inside is nil.std.text::substring with s being after-open, start being 0, length being closed
+        append (classify with inside being inside) to tokens
+        set rest to nil.std.text::substring with s being after-open, start being closed plus 2,
+            length being (nil.std.text::length with s being after-open) minus closed minus 2
+    end repeat
+    give tokens
+end paragraph
+
+
+classify receives inside as text returns template-token begin paragraph
+    when inside equals "" then
+        give build template-token with kind being "comment", body being ""
+    end when
+    value marker is nil.std.text::substring with s being inside, start being 0, length being 1
+    value rest is nil.std.text::trim with s being
+        (nil.std.text::substring with s being inside, start being 1,
+            length being (nil.std.text::length with s being inside) minus 1)
+
+    when marker equals "=" then
+        give build template-token with kind being "output", body being rest
+    end when
+    when marker equals "!" then
+        give build template-token with kind being "raw", body being rest
+    end when
+    when marker equals "#" then
+        give build template-token with kind being "comment", body being rest
+    end when
+    when marker equals "@" then
+        give classify-directive with rest being rest
+    end when
+
+    value word-run is nil.std.text::trim with s being inside
+    value first-word is before-first with input being word-run, separator being " "
+    value tail is nil.std.text::trim with s being (after-first with input being word-run, separator being " ")
+    when first-word equals "if" then
+        give build template-token with kind being "if", body being tail
+    end when
+    when first-word equals "unless" then
+        give build template-token with kind being "unless", body being tail
+    end when
+    when first-word equals "for" then
+        give build template-token with kind being "loop", body being tail
+    end when
+    when word-run equals "else" then
+        give build template-token with kind being "else", body being ""
+    end when
+    when word-run equals "end" then
+        give build template-token with kind being "ending", body being ""
+    end when
+    give build template-token with kind being "broken", body being word-run
+end paragraph
+
+
+classify-directive receives rest as text returns template-token begin paragraph
+    value word-run is nil.std.text::trim with s being rest
+    value first-word is before-first with input being word-run, separator being " "
+    value named is unquoted with raw being (nil.std.text::trim with s being
+        (after-first with input being word-run, separator being " "))
+    when first-word equals "include" then
+        give build template-token with kind being "include", body being named
+    end when
+    when first-word equals "layout" then
+        give build template-token with kind being "layout", body being named
+    end when
+    when word-run equals "content" then
+        give build template-token with kind being "slot", body being ""
+    end when
+    give build template-token with kind being "broken", body being word-run
+end paragraph
+
+
+unquoted receives raw as text returns text begin paragraph
+    value width is nil.std.text::length with s being raw
+    when width is less than 2 then
+        give raw
+    end when
+    value first is nil.std.text::substring with s being raw, start being 0, length being 1
+    value last is nil.std.text::substring with s being raw, start being width minus 1, length being 1
+    when first equals quote and last equals quote then
+        give nil.std.text::substring with s being raw, start being 1, length being width minus 2
+    end when
+    give raw
+end paragraph
+
+
+!!! --- Render a template held as text.
+
+public render-source receives source as text, page-data as render-context, root as text
+    returns render-result begin paragraph
+    give render-at-depth with source being source, page-data being page-data, root being root, depth being 0
+end paragraph
+
+
+!!! --- Render a template held in a file under `root`.
+
+public render-file receives name as text, page-data as render-context, root as text
+    returns render-result begin paragraph
+    value loaded is load-template with name being name, root being root
+    when not loaded.rendered then
+        give loaded
+    end when
+    give render-at-depth with source being loaded.text-out, page-data being page-data, root being root, depth being 0
+end paragraph
+
+
+render-at-depth receives source as text, page-data as render-context, root as text, depth as number
+    returns render-result begin paragraph
+    when depth is greater than nesting-limit then
+        give failed-render with complaint being "templates nest more than "
+            plus (nesting-limit becomes text) plus " deep; this is a cycle"
+    end when
+
+    value tokens is tokenize with source being source
+    value inner is render-range with tokens being tokens, start-at being 0, upto being the length of tokens,
+        page-data being page-data, root being root, depth being depth
+    when not inner.rendered then
+        give inner
+    end when
+
+    !!! A layout wraps the page: the page renders first, then the layout
+    !!! renders with the page's output dropped in at <%@ content %>. Declared
+    !!! anywhere in the file, because a layout line at the top is a convention
+    !!! and not a parsing requirement.
+    value wrapper is first-layout with tokens being tokens
+    when wrapper equals "" then
+        give inner
+    end when
+    value shell is load-template with name being wrapper, root being root
+    when not shell.rendered then
+        give shell
+    end when
+    value wrapped is render-at-depth with source being
+        (filled-slot with shell being shell.text-out, inner being inner.text-out),
+        page-data being page-data, root being root, depth being depth plus 1
+    give wrapped
+end paragraph
+
+
+!!! --- Put the page into the layout before the layout is rendered, so a
+!!! layout's own tags still run and the page's output is never re-scanned for
+!!! tags it does not contain.
+
+filled-slot receives shell as text, inner as text returns text begin paragraph
+    variable out as text is shell
+    set out to nil.std.text::replace with s being out, old_value being "<%@ content %>", new_value being inner
+    set out to nil.std.text::replace with s being out, old_value being "<%@content%>", new_value being inner
+    give out
+end paragraph
+
+
+first-layout receives tokens as array of template-token returns text begin paragraph
+    repeat for each token in tokens
+        when token.kind equals "layout" then
+            give token.body
+        end when
+    end repeat
+    give ""
+end paragraph
+
+
+render-range receives tokens as array of template-token, start-at as number, upto as number,
+    page-data as render-context, root as text, depth as number returns render-result begin paragraph
+    variable out as text is ""
+    variable index as number is start-at
+    repeat while index is less than upto
+        value token is tokens at index
+        value kind is token.kind
+
+        when kind equals "literal" then
+            set out to out plus token.body
+            set index to index plus 1
+        otherwise when kind equals "output" then
+            set out to out plus (escape-html with raw being (value-of with page-data being page-data, name being token.body))
+            set index to index plus 1
+        otherwise when kind equals "raw" then
+            set out to out plus (value-of with page-data being page-data, name being token.body)
+            set index to index plus 1
+        otherwise when kind equals "comment" or kind equals "layout" then
+            set index to index plus 1
+        otherwise when kind equals "slot" then
+            !!! Only meaningful inside a layout, where it was already filled.
+            set index to index plus 1
+        otherwise when kind equals "include" then
+            value part is load-template with name being token.body, root being root
+            when not part.rendered then
+                give part
+            end when
+            value done is render-at-depth with source being part.text-out, page-data being page-data,
+                root being root, depth being depth plus 1
+            when not done.rendered then
+                give done
+            end when
+            set out to out plus done.text-out
+            set index to index plus 1
+        otherwise when kind equals "if" or kind equals "unless" then
+            value spans is block-spans with tokens being tokens, opener being index, upto being upto
+            when spans.0 is less than 0 then
+                give failed-render with complaint being "a <% " plus kind plus " %> has no <% end %>"
+            end when
+            value held is is-set with page-data being page-data, name being token.body
+            value taken is when kind equals "if" give held otherwise give not held end when
+            value branch is when taken
+                give (render-range with tokens being tokens, start-at being index plus 1,
+                    upto being (when spans.1 is at least 0 give spans.1 otherwise give spans.0 end when),
+                    page-data being page-data, root being root, depth being depth)
+                otherwise give (render-else with tokens being tokens, spans being spans,
+                    page-data being page-data, root being root, depth being depth)
+            end when
+            when not branch.rendered then
+                give branch
+            end when
+            set out to out plus branch.text-out
+            set index to spans.0 plus 1
+        otherwise when kind equals "loop" then
+            value spans is block-spans with tokens being tokens, opener being index, upto being upto
+            when spans.0 is less than 0 then
+                give failed-render with complaint being "a <% for %> has no <% end %>"
+            end when
+            value repeated is render-loop with tokens being tokens, header being token.body,
+                start-at being index plus 1, upto being spans.0, page-data being page-data,
+                root being root, depth being depth
+            when not repeated.rendered then
+                give repeated
+            end when
+            set out to out plus repeated.text-out
+            set index to spans.0 plus 1
+        otherwise when kind equals "else" or kind equals "ending" then
+            give failed-render with complaint being "a <% " plus
+                (when kind equals "ending" give "end" otherwise give "else" end when)
+                plus " %> has no block to close"
+        otherwise
+            give failed-render with complaint being "unrecognised tag: <% " plus token.body plus " %>"
+        end when
+    end repeat
+    give build render-result with text-out being out, rendered being true, complaint being ""
+end paragraph
+
+
+render-else receives tokens as array of template-token, spans as tuple of (number, number),
+    page-data as render-context, root as text, depth as number returns render-result begin paragraph
+    when spans.1 is less than 0 then
+        give build render-result with text-out being "", rendered being true, complaint being ""
+    end when
+    give render-range with tokens being tokens, start-at being spans.1 plus 1, upto being spans.0,
+        page-data being page-data, root being root, depth being depth
+end paragraph
+
+
+!!! --- Find a block's `end`, and its `else` if it has one at this level.
+!!!
+!!! Gives back (end-index, else-index), each minus one when absent. Nested
+!!! blocks are counted so an inner `end` does not close an outer block, and an
+!!! `else` inside a nested block is not mistaken for this one's.
+
+block-spans receives tokens as array of template-token, opener as number, upto as number
+    returns tuple of (number, number) begin paragraph
+    variable nesting as number is 0
+    variable else-at as number is 0 minus 1
+    variable index as number is opener plus 1
+    repeat while index is less than upto
+        value kind is (tokens at index).kind
+        when kind equals "if" or kind equals "unless" or kind equals "loop" then
+            set nesting to nesting plus 1
+        otherwise when kind equals "ending" then
+            when nesting equals 0 then
+                give (index, else-at)
+            end when
+            set nesting to nesting minus 1
+        otherwise when kind equals "else" and nesting equals 0 and else-at is less than 0 then
+            set else-at to index
+        end when
+        set index to index plus 1
+    end repeat
+    give (0 minus 1, else-at)
+end paragraph
+
+
+!!! --- `<% for one in many %>`: render the body once per row of `many`, with
+!!! each row's cells bound under `one`.
+!!!
+!!! A set with no rows renders nothing, which is what an empty list should
+!!! look like. A header that is not `<name> in <name>` is a template bug and
+!!! says so rather than quietly rendering zero times.
+
+render-loop receives tokens as array of template-token, header as text, start-at as number, upto as number,
+    page-data as render-context, root as text, depth as number returns render-result begin paragraph
+    value binder is nil.std.text::trim with s being (before-first with input being header, separator being " in ")
+    value source-name is nil.std.text::trim with s being (after-first with input being header, separator being " in ")
+    when binder equals "" or source-name equals "" then
+        give failed-render with complaint being "a <% for %> needs '<one> in <many>', found: " plus header
+    end when
+
+    value rows is rows-of with page-data being page-data, name being source-name
+    variable out as text is ""
+    variable position as number is 0
+    repeat for each one-row in rows
+        variable inner is with-row-bound with page-data being page-data, prefix being binder, one-row being one-row
+        set inner to with-number with page-data being inner, name being binder plus ".index", amount being position
+        set inner to with-flag with page-data being inner, name being binder plus ".first",
+            held being position equals 0
+        set inner to with-flag with page-data being inner, name being binder plus ".last",
+            held being position equals (the length of rows) minus 1
+        value piece is render-range with tokens being tokens, start-at being start-at, upto being upto,
+            page-data being inner, root being root, depth being depth
+        when not piece.rendered then
+            give piece
+        end when
+        set out to out plus piece.text-out
+        set position to position plus 1
+    end repeat
+    give build render-result with text-out being out, rendered being true, complaint being ""
+end paragraph
+
+
+!!! --- Load a template start-at under `root`.
+!!!
+!!! The name must stay inside the template directory. A name containing `..`
+!!! is refused outright rather than resolved and checked afterwards: the
+!!! check-after-resolve shape is the one that goes wrong on the platform
+!!! nobody tested, and a template name has no legitimate reason to climb.
+
+public load-template receives name as text, root as text returns render-result begin paragraph
+    when name equals "" then
+        give failed-render with complaint being "a template was asked for by an empty name"
+    end when
+    when nil.std.text::contains with s being name, needle being ".." then
+        give failed-render with complaint being "a template name may not climb out of the template directory: " plus name
+    end when
+    when (nil.std.text::starts_with with s being name, prefix being "/")
+        or (nil.std.text::contains with s being name, needle being ":") then
+        give failed-render with complaint being "a template name must be relative: " plus name
+    end when
+
+    value path is when root equals "" give name otherwise give root plus "/" plus name end when
+    when not (nil.std.io::exists with path being path) then
+        give failed-render with complaint being "no such template: " plus name
+    end when
+    value outcome is nil.std.io::read_text with path being path
+    consider outcome
+        when Result.Ok holding body then
+            give build render-result with text-out being body, rendered being true, complaint being ""
+        when Result.Error holding why then
+            give failed-render with complaint being "could not read template " plus name plus ": " plus why
+        otherwise
+            give failed-render with complaint being "could not read template " plus name
+    end consider
+end paragraph
+
+
+failed-render receives complaint as text returns render-result begin paragraph
+    give build render-result with text-out being "", rendered being false, complaint being complaint
+end paragraph

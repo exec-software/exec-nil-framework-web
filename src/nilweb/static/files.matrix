@@ -1,0 +1,191 @@
+!!! Serving a directory of files.
+!!!
+!!! The whole job is one decision made correctly — which bytes on disk a URL
+!!! path is allowed to name — and the ways that decision goes wrong are well
+!!! known enough to enumerate. Each check below is one of them.
+!!!
+!!! The file is read whole into text. That is fine for the stylesheets and
+!!! scripts a page needs and wrong for anything large, and it is what the
+!!! runtime offers: `file.read_text` reads a whole file, and the streaming
+!!! handles exist but there is nothing to stream *to* until there is a socket.
+!!! `maximum-bytes` keeps a large file from being read at all rather than
+!!! pretending it can be served.
+
+book nilweb.static.files
+
+read nil.std.io.file
+read nil.std.core
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.http.status
+read everything from nilweb.http.headers
+read everything from nilweb.http.response
+
+
+!!! Larger than this and the answer is 413 rather than a read that would hold
+!!! the whole thing in memory to hand to a transport that must then hold it
+!!! again. Two megabytes covers a web font; a video is not this module's job.
+constant maximum-bytes as number is 2097152
+
+
+!!! --- Serve `path` from under `root`.
+!!!
+!!! The response is complete, including its Content-Type, or it is the right
+!!! refusal. A 404 is given for anything the caller may not have, including
+!!! things that exist — a probe must not be able to tell a file it may not see
+!!! from a file that is not there.
+
+public serve-file receives root as text, path as text returns http-response begin paragraph
+    value relative is without-leading-slash with path being path
+    when not (is-safe-name with name being relative) then
+        give error-response with code being status-not-found, explanation being "No such file"
+    end when
+    when relative equals "" then
+        give error-response with code being status-not-found, explanation being "No such file"
+    end when
+
+    value full is when root equals "" give relative otherwise give root plus "/" plus relative end when
+    when not (nil.std.io::exists with path being full) then
+        give error-response with code being status-not-found, explanation being "No such file"
+    end when
+
+    value measured is nil.std.io::size with path being full
+    consider measured
+        !!! `begin block` because this arm holds its own `when`: without it
+        !!! the nested conditional reads as the next pattern arm.
+        when Result.Ok holding width then begin block
+            when width is greater than maximum-bytes then
+                give error-response with code being status-payload-too-large,
+                    explanation being "That file is too large to serve"
+            end when
+        end block
+        when Result.Error holding why then
+            give error-response with code being status-not-found, explanation being "No such file"
+        otherwise
+            give error-response with code being status-not-found, explanation being "No such file"
+    end consider
+
+    value outcome is nil.std.io::read_text with path being full
+    consider outcome
+        when Result.Ok holding body then
+            give make-response with code being status-ok,
+                kind being (media-type-of with name being relative), body being body
+        when Result.Error holding why then
+            give error-response with code being status-not-found, explanation being "No such file"
+        otherwise
+            give error-response with code being status-not-found, explanation being "No such file"
+    end consider
+end paragraph
+
+
+!!! --- Serve a file and ask the client to keep it.
+!!! Only for assets whose name changes when their content does; a cached
+!!! `/style.css` is how a deploy ships to half its users.
+
+public serve-cached receives root as text, path as text, seconds as number returns http-response begin paragraph
+    value answer is serve-file with root being root, path being path
+    when answer.code does not equal status-ok then
+        give answer
+    end when
+    give with-header with response being answer, name being "Cache-Control",
+        content being "public, max-age=" plus (seconds becomes text)
+end paragraph
+
+
+!!! --- Whether a path from a URL may name a file.
+!!!
+!!! Refused by shape rather than resolved and then checked. Resolving first
+!!! means trusting whatever the platform does with the name, and the platform
+!!! that does something unexpected is always the one not tested. Every refusal
+!!! here costs a legitimate file nothing, because none of these shapes appear
+!!! in a name anyone meant to publish.
+
+public is-safe-name receives name as text returns boolean begin paragraph
+    !!! Climbing out, in any spelling the path layer might later collapse.
+    when nil.std.text::contains with s being name, needle being ".." then give false end when
+    !!! Absolute, or a Windows drive or UNC name.
+    when nil.std.text::starts_with with s being name, prefix being "/" then give false end when
+    when nil.std.text::contains with s being name, needle being ":" then give false end when
+    when nil.std.text::contains with s being name, needle being "\" then give false end when
+    !!! A null byte truncates the name for whatever C function sees it last.
+    when nil.std.text::contains with s being name, needle being (zero-byte with nothing) then give false end when
+    !!! A dotfile is configuration, not content: .env, .git, .htpasswd.
+    when nil.std.text::starts_with with s being name, prefix being "." then give false end when
+    when nil.std.text::contains with s being name, needle being "/." then give false end when
+    !!! An empty segment means a doubled separator, which some path layers
+    !!! collapse and some do not. Not worth finding out which this one is.
+    when nil.std.text::contains with s being name, needle being "//" then give false end when
+    give true
+end paragraph
+
+
+zero-byte returns text begin paragraph
+    give nil.std.core::Convert.i32_to_char with code being 0
+end paragraph
+
+
+without-leading-slash receives path as text returns text begin paragraph
+    variable out as text is path
+    repeat while nil.std.text::starts_with with s being out, prefix being "/"
+        set out to nil.std.text::substring with s being out, start being 1,
+            length being (nil.std.text::length with s being out) minus 1
+    end repeat
+    give out
+end paragraph
+
+
+!!! --- The media type for a name, by its last suffix.
+!!!
+!!! An unknown suffix is application/octet-stream and never text/html. A
+!!! browser told something is HTML will run the script in it, so guessing
+!!! generously here is how an upload directory becomes a cross-site scripting
+!!! hole. `charset=utf-8` is stated for every text type, because a browser
+!!! left to guess an encoding guesses, and sometimes picks one that turns a
+!!! harmless file into markup.
+
+public media-type-of receives name as text returns text begin paragraph
+    value folded is nil.std.text::to_lower with s being name
+    value suffix is last-extension with name being folded
+    give switch suffix
+        case "html" then stop switching with "text/html; charset=utf-8"
+        case "htm" then stop switching with "text/html; charset=utf-8"
+        case "css" then stop switching with "text/css; charset=utf-8"
+        case "js" then stop switching with "text/javascript; charset=utf-8"
+        case "mjs" then stop switching with "text/javascript; charset=utf-8"
+        case "json" then stop switching with "application/json"
+        case "txt" then stop switching with "text/plain; charset=utf-8"
+        case "md" then stop switching with "text/markdown; charset=utf-8"
+        case "csv" then stop switching with "text/csv; charset=utf-8"
+        case "xml" then stop switching with "application/xml"
+        case "svg" then stop switching with "image/svg+xml"
+        case "png" then stop switching with "image/png"
+        case "jpg" then stop switching with "image/jpeg"
+        case "jpeg" then stop switching with "image/jpeg"
+        case "gif" then stop switching with "image/gif"
+        case "webp" then stop switching with "image/webp"
+        case "avif" then stop switching with "image/avif"
+        case "ico" then stop switching with "image/x-icon"
+        case "woff" then stop switching with "font/woff"
+        case "woff2" then stop switching with "font/woff2"
+        case "ttf" then stop switching with "font/ttf"
+        case "otf" then stop switching with "font/otf"
+        case "pdf" then stop switching with "application/pdf"
+        case "wasm" then stop switching with "application/wasm"
+        otherwise stop switching with "application/octet-stream"
+    end switch
+end paragraph
+
+
+last-extension receives name as text returns text begin paragraph
+    value dot is nil.std.text::last_index_of with s being name, needle being "."
+    when dot is less than 0 then
+        give ""
+    end when
+    value slash is nil.std.text::last_index_of with s being name, needle being "/"
+    when dot is less than slash then
+        give ""
+    end when
+    value after is dot plus 1
+    give nil.std.text::substring with s being name, start being after,
+        length being (nil.std.text::length with s being name) minus after
+end paragraph

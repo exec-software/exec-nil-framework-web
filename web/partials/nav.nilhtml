@@ -1,0 +1,6 @@
+<nav>
+  <a href="/">Home</a>
+  <a href="/posts">Posts</a>
+<% if signed-in %>  <span>Signed in as <%= who %></span>
+<% else %>  <a href="/sign-in">Sign in</a>
+<% end %></nav>

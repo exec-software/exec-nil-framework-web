@@ -10,7 +10,7 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-The HTTP core is complete and tested — 153 checks, all passing.
+Everything above the transport is built and tested — 241 checks, all passing.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -22,14 +22,15 @@ The HTTP core is complete and tested — 153 checks, all passing.
 | `nilweb.http.request` | parsing a whole request message | done |
 | `nilweb.http.response` | building and rendering a response | done |
 | `nilweb.routing.router` | patterns, captures, wildcards, 404 vs 405 | done |
-| templates | `.nilhtml` rendering with layouts and partials | not started |
-| sessions | signed cookies and a server-side store | not started |
-| static files | serving a directory with caching validators | not started |
-| middleware | a request/response chain | not started |
+| `nilweb.template.context` | the data a template may read | done |
+| `nilweb.template.render` | `.nilhtml` with layouts, partials, loops, escaping | done |
+| `nilweb.session.session` | a server-side store and the cookie attributes | done (ids are the caller's — see below) |
+| `nilweb.static.files` | serving a directory, with the traversal checks | done |
+| `nilweb.middleware.chain` | guards before a handler, finishers after | done |
 | **transport** | **accepting a connection** | **blocked — see below** |
 
 ```sh
-./scripts/test.sh    # 153 checks
+./scripts/test.sh    # 241 checks
 ./scripts/demo.sh    # requests in, responses out
 ```
 
@@ -80,13 +81,60 @@ that is plain data — readable, testable and reorderable without running it.
 reached by FFI. Matrix can do the string work itself, and a template engine in
 the language it serves is one that can be read by the people using it.
 
-**Everything is a value.** A response is a record; middleware takes one and
+**Middleware is two lists, not a chain of wrapped calls.** The `next(request)`
+shape every other framework uses needs somewhere to capture `next`, and Matrix
+has no capturing closures. What replaces it is a list of guards that run before
+a handler and may answer instead of it, and a list of finishers applied to
+whatever response comes back. A guard cannot wrap a handler in an `attempt` or
+carry a local across the handler; what it can do is be printed, which is more
+than most middleware stacks manage. An unwired guard fails closed with a 500,
+because a configuration mistake in a security check must not be a quiet pass.
+
+**Everything is a value.** A response is a record; a finisher takes one and
 gives back another. Nothing mutates a shared request object, which is what makes
 a handler testable without a server.
 
 **Parsing happens once.** NyWeb re-split the query string on every lookup, so a
 page reading five parameters parsed the query five times. Here a request is
 parsed at construction and read from arrays afterwards.
+
+## Sessions do not generate their own identifiers
+
+A session id is a bearer credential: whoever holds one is the user. It has to
+come from a cryptographically secure source, and there is none reachable from
+Matrix today:
+
+- `nil.std.math` is MINSTD, a 31-bit linear congruential generator whose global
+  stream starts at the seed 12345. Its own documentation says "neither API is
+  cryptographic". Two draws reveal the stream.
+- `nil.std.security` has base64 and hex. No hash, no HMAC, no random.
+- The runtime has no crypto or random intrinsic of any kind.
+- `/dev/urandom` cannot be read: `file.read_regular_bytes` refuses a character
+  device by design, and `file.read_bytes` returns empty for one.
+
+So `start-session` takes the id from its caller, and the caller is expected to
+get it from the same native shim that will be providing the socket —
+`getrandom(2)` is one more export on a library that has to exist anyway.
+`development-id` exists so the tests and the demo can run, is named so it
+cannot be reached for by accident, and documents exactly what it is not.
+
+Everything else about sessions is the part that can be got right today and is:
+expiry, renewal on write, the store, and above all the cookie — `HttpOnly`,
+`SameSite=Lax`, `Path=/`, a `Max-Age` that matches the store, and `Secure` as
+the one thing left to the caller, because a `Secure` cookie is not sent over
+the plain HTTP that development runs on.
+
+## Templates read; they do not evaluate
+
+`<%= user.name %>` does not mean "evaluate this expression". There is no
+runtime evaluator in Matrix — no `eval`, no reflection over locals — so it
+means "look this name up in the context the handler published". NyWeb's engine
+parsed Ny expressions and the runtime evaluated them; that is not available and
+would not be reconstructed here if it were.
+
+It is a narrower contract and a sturdier one. A template can only read what a
+handler decided to publish, so it cannot reach into a session, open a file or
+call a service, and reviewing what a page can see is reading one paragraph.
 
 ## A known limit in percent-encoding
 
@@ -110,17 +158,23 @@ a way that only shows up on someone's name.
 ## Layout
 
 ```text
-src/nilweb/text/scan.matrix        text splitting and folding
-src/nilweb/http/method.matrix      request methods
-src/nilweb/http/status.matrix      status codes and reason phrases
-src/nilweb/http/headers.matrix     header fields
-src/nilweb/http/uri.matrix         percent coding and query strings
-src/nilweb/http/request.matrix     the inbound request
-src/nilweb/http/response.matrix    the outbound response
-src/nilweb/routing/router.matrix   route matching
-src/main.matrix                    a demonstration, and the `answer` entry point
-tests/run-tests.matrix             every suite
-tests/nilweb/tests/harness.matrix  the checks
+src/nilweb/text/scan.matrix          text splitting and folding
+src/nilweb/http/method.matrix        request methods
+src/nilweb/http/status.matrix        status codes and reason phrases
+src/nilweb/http/headers.matrix       header fields
+src/nilweb/http/uri.matrix           percent coding and query strings
+src/nilweb/http/request.matrix       the inbound request
+src/nilweb/http/response.matrix      the outbound response
+src/nilweb/routing/router.matrix     route matching
+src/nilweb/template/context.matrix   the data a template may read
+src/nilweb/template/render.matrix    the .nilhtml engine
+src/nilweb/session/session.matrix    sessions and their cookie
+src/nilweb/static/files.matrix       serving a directory
+src/nilweb/middleware/chain.matrix   guards and finishers
+src/main.matrix                      a demonstration, and the `answer` entry point
+web/                                 the demonstration's templates and assets
+tests/run-tests.matrix               every suite
+tests/nilweb/tests/harness.matrix    the checks
 ```
 
 A book lives at the path its name spells: `book nilweb.http.request` is

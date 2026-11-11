@@ -1,0 +1,4 @@
+<%@ layout "layouts/main.nilhtml" %>
+<h1><%= heading %></h1>
+<p>A web framework written in Matrix, for the NIL framework.</p>
+<p>It has no server in it yet, and the README says why.</p>

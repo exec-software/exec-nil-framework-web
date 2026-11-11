@@ -14,6 +14,11 @@ read everything from nilweb.http.uri
 read everything from nilweb.http.request
 read everything from nilweb.http.response
 read everything from nilweb.routing.router
+read everything from nilweb.template.context
+read everything from nilweb.template.render
+read everything from nilweb.session.session
+read everything from nilweb.static.files
+read everything from nilweb.middleware.chain
 
 scan-tests returns nothing begin paragraph
     evaluate section with title being "nilweb.text.scan"
@@ -389,6 +394,319 @@ router-tests returns nothing begin paragraph
     give nothing
 end paragraph
 
+template-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.template"
+    variable page-data is empty-context with nothing
+    set page-data to with-value with page-data being page-data, name being "name", content being "Ada"
+    set page-data to with-value with page-data being page-data, name being "bio", content being "<script>alert(1)</script>"
+    set page-data to with-flag with page-data being page-data, name being "member", held being true
+    set page-data to with-flag with page-data being page-data, name being "banned", held being false
+
+    evaluate same-text with label being "a value substitutes",
+        actual being (rendered-text with source being "Hi <%= name %>!", page-data being page-data), expected being "Hi Ada!"
+    evaluate same-text with label being "a value is HTML-escaped",
+        actual being (rendered-text with source being "<%= bio %>", page-data being page-data),
+        expected being "&lt;script&gt;alert(1)&lt;/script&gt;"
+    evaluate same-text with label being "a raw value is not escaped",
+        actual being (rendered-text with source being "<%! bio %>", page-data being page-data),
+        expected being "<script>alert(1)</script>"
+    evaluate same-text with label being "an unknown name renders as nothing",
+        actual being (rendered-text with source being "[<%= nobody %>]", page-data being page-data), expected being "[]"
+    evaluate same-text with label being "a comment is dropped",
+        actual being (rendered-text with source being "a<%# note %>b", page-data being page-data), expected being "ab"
+
+    evaluate same-text with label being "escaping does the ampersand first",
+        actual being (escape-html with raw being "a&<b"), expected being "a&amp;&lt;b"
+    evaluate same-text with label being "both quote styles are escaped",
+        actual being (escape-html with raw being quote plus "'"), expected being "&quot;&#39;"
+
+    evaluate same-text with label being "a set flag takes the if branch",
+        actual being (rendered-text with source being "<% if member %>yes<% end %>", page-data being page-data), expected being "yes"
+    evaluate same-text with label being "an unset flag skips the if branch",
+        actual being (rendered-text with source being "<% if banned %>yes<% end %>", page-data being page-data), expected being ""
+    evaluate same-text with label being "else is taken when the flag is unset",
+        actual being (rendered-text with source being "<% if banned %>yes<% else %>no<% end %>", page-data being page-data), expected being "no"
+    evaluate same-text with label being "else is skipped when the flag is set",
+        actual being (rendered-text with source being "<% if member %>yes<% else %>no<% end %>", page-data being page-data), expected being "yes"
+    evaluate same-text with label being "unless inverts the test",
+        actual being (rendered-text with source being "<% unless banned %>clear<% end %>", page-data being page-data), expected being "clear"
+    evaluate same-text with label being "nested blocks close in the right order",
+        actual being (rendered-text with source being "<% if member %>[<% if banned %>x<% else %>y<% end %>]<% end %>", page-data being page-data),
+        expected being "[y]"
+
+    variable rows is no-rows with nothing
+    set rows to add-row with rows being rows,
+        one-row being (row-with with one-row being (row-with with one-row being (new-row with nothing),
+            name being "title", content being "First"), name being "slug", content being "one")
+    set rows to add-row with rows being rows,
+        one-row being (row-with with one-row being (row-with with one-row being (new-row with nothing),
+            name being "title", content being "Second"), name being "slug", content being "two")
+    set page-data to with-rows with page-data being page-data, name being "posts", rows being rows
+
+    evaluate same-text with label being "a loop repeats its body",
+        actual being (rendered-text with source being "<% for post in posts %>[<%= post.title %>]<% end %>", page-data being page-data),
+        expected being "[First][Second]"
+    evaluate same-text with label being "a loop binds every cell",
+        actual being (rendered-text with source being "<% for post in posts %><%= post.slug %><% end %>", page-data being page-data),
+        expected being "onetwo"
+    evaluate same-text with label being "a loop publishes its index",
+        actual being (rendered-text with source being "<% for post in posts %><%= post.index %><% end %>", page-data being page-data),
+        expected being "01"
+    evaluate same-text with label being "a loop marks its first and last rows",
+        actual being (rendered-text with source being "<% for post in posts %><% if post.first %>F<% end %><% if post.last %>L<% end %><% end %>", page-data being page-data),
+        expected being "FL"
+    evaluate same-text with label being "an empty set renders nothing",
+        actual being (rendered-text with source being "<% for x in nothing-here %>no<% end %>", page-data being page-data), expected being ""
+    evaluate same-text with label being "a conditional inside a loop works",
+        actual being (rendered-text with source being "<% for post in posts %><% if post.first %><%= post.title %><% end %><% end %>", page-data being page-data),
+        expected being "First"
+
+    evaluate is-true with label being "an unclosed block is reported",
+        actual being not (render-source with source being "<% if member %>oops", page-data being page-data, root being "").rendered
+    evaluate is-true with label being "a stray end is reported",
+        actual being not (render-source with source being "<% end %>", page-data being page-data, root being "").rendered
+    evaluate is-true with label being "an unterminated tag is reported",
+        actual being not (render-source with source being "<%= name", page-data being page-data, root being "").rendered
+    evaluate is-true with label being "a malformed loop header is reported",
+        actual being not (render-source with source being "<% for broken %>x<% end %>", page-data being page-data, root being "").rendered
+
+    evaluate is-true with label being "a template name may not climb out of its directory",
+        actual being not (load-template with name being "../outside-root.txt", root being "tests/templates").rendered
+    evaluate is-true with label being "an absolute template name is refused",
+        actual being not (load-template with name being "/etc/hostname", root being "tests/templates").rendered
+    evaluate is-true with label being "a missing template is reported",
+        actual being not (load-template with name being "no-such.nilhtml", root being "tests/templates").rendered
+
+    variable page is empty-context with nothing
+    set page to with-value with page-data being page, name being "title", content being "Welcome"
+    set page to with-value with page-data being page, name being "heading", content being "Hello"
+    set page to with-value with page-data being page, name being "site", content being "nil-web"
+    value whole is render-file with name being "page.nilhtml", page-data being page, root being "tests/templates"
+    evaluate is-true with label being "a page with a layout and an include renders", actual being whole.rendered
+    evaluate is-true with label being "the layout wrapped the page",
+        actual being (nil.std.text::starts_with with s being whole.text-out, prefix being "<!doctype html>")
+    evaluate is-true with label being "the layout read its own value",
+        actual being (nil.std.text::contains with s being whole.text-out, needle being "<title>Welcome</title>")
+    evaluate is-true with label being "the include was rendered",
+        actual being (nil.std.text::contains with s being whole.text-out, needle being "<nav>nil-web</nav>")
+    evaluate is-true with label being "the page body is inside the layout",
+        actual being (nil.std.text::contains with s being whole.text-out, needle being "<h1>Hello</h1>")
+
+    evaluate is-true with label being "a template that includes itself is stopped",
+        actual being not (render-file with name being "cycle.nilhtml", page-data being page, root being "tests/templates").rendered
+    give nothing
+end paragraph
+
+
+!!! --- Render and take the text, for the checks that expect success.
+
+rendered-text receives source as text, page-data as render-context returns text begin paragraph
+    value outcome is render-source with source being source, page-data being page-data, root being ""
+    when not outcome.rendered then
+        give "RENDER FAILED: " plus outcome.complaint
+    end when
+    give outcome.text-out
+end paragraph
+
+session-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.session"
+    value start-time is 1000000
+    variable store is new-store with nothing
+    set store to store-with-lifetime with store being store, lifetime being 60000
+
+    value id is development-id with now-at being start-time
+    set store to start-session with store being store, id being id, now-at being start-time
+    evaluate is-true with label being "a started session is live",
+        actual being (has-session with store being store, id being id, now-at being start-time)
+    evaluate is-true with label being "an unknown id is not a session",
+        actual being not (has-session with store being store, id being "other", now-at being start-time)
+
+    set store to set-in with store being store, id being id, name being "user", content being "ada", now-at being start-time
+    evaluate same-text with label being "a session value reads back",
+        actual being (value-in with store being store, id being id, name being "user", now-at being start-time), expected being "ada"
+    evaluate same-text with label being "an unset session value is empty",
+        actual being (value-in with store being store, id being id, name being "role", now-at being start-time), expected being ""
+
+    set store to set-in with store being store, id being id, name being "user", content being "grace", now-at being start-time
+    evaluate same-text with label being "writing again replaces the value",
+        actual being (value-in with store being store, id being id, name being "user", now-at being start-time), expected being "grace"
+    evaluate same-number with label being "replacing does not duplicate the session",
+        actual being (live-count with store being store, now-at being start-time), expected being 1
+
+    value past-expiry is start-time plus 60001
+    evaluate is-true with label being "a session past its lifetime is gone",
+        actual being not (has-session with store being store, id being id, now-at being past-expiry)
+    evaluate same-text with label being "an expired session reads as empty, not stale",
+        actual being (value-in with store being store, id being id, name being "user", now-at being past-expiry), expected being ""
+
+    value mid-life is start-time plus 30000
+    set store to set-in with store being store, id being id, name being "user", content being "ada", now-at being mid-life
+    evaluate is-true with label being "writing pushes the expiry out",
+        actual being (has-session with store being store, id being id, now-at being past-expiry)
+
+    set store to end-session with store being store, id being id
+    evaluate is-true with label being "an ended session is gone",
+        actual being not (has-session with store being store, id being id, now-at being mid-life)
+
+    !!! A short lifetime, so the session started at time 1 is already past it
+    !!! when the sweep runs. With the default hour both would still be live.
+    variable second-store is store-with-lifetime with store being (new-store with nothing), lifetime being 1000
+    value kept is development-id with now-at being start-time
+    value dropped is development-id with now-at being start-time
+    evaluate is-true with label being "two development ids differ within one run", actual being not (kept equals dropped)
+    set second-store to start-session with store being second-store, id being kept, now-at being start-time
+    set second-store to start-session with store being second-store, id being dropped, now-at being 1
+    evaluate same-number with label being "sweeping drops only what expired",
+        actual being (live-count with store being (sweep-expired with store being second-store, now-at being start-time),
+            now-at being start-time), expected being 1
+
+    value signed-in is with-session-cookie with response being (text-response with body being "in"),
+        id being "abc", store being store, secure being true
+    value crumb is field-value with fields being signed-in.fields, name being "Set-Cookie"
+    evaluate is-true with label being "the session cookie is HttpOnly",
+        actual being (nil.std.text::contains with s being crumb, needle being "HttpOnly")
+    evaluate is-true with label being "the session cookie is SameSite=Lax",
+        actual being (nil.std.text::contains with s being crumb, needle being "SameSite=Lax")
+    evaluate is-true with label being "the session cookie is Secure when asked",
+        actual being (nil.std.text::contains with s being crumb, needle being "Secure")
+    evaluate is-true with label being "the session cookie is scoped to the application",
+        actual being (nil.std.text::contains with s being crumb, needle being "Path=/")
+    evaluate is-true with label being "the cookie lifetime matches the store",
+        actual being (nil.std.text::contains with s being crumb, needle being "Max-Age=60")
+
+    value plain-cookie is field-value with fields being (with-session-cookie with response being (text-response with body being "in"),
+        id being "abc", store being store, secure being false).fields, name being "Set-Cookie"
+    evaluate is-true with label being "Secure is left off when not asked",
+        actual being not (nil.std.text::contains with s being plain-cookie, needle being "Secure")
+
+    value signed-out is with-ended-cookie with response being (text-response with body being "out"), secure being true
+    evaluate is-true with label being "signing out expires the cookie",
+        actual being (nil.std.text::contains with s being
+            (field-value with fields being signed-out.fields, name being "Set-Cookie"), needle being "Max-Age=0")
+
+    value carrying is make-request with verb being request-method.Get, target being "/",
+        fields being (set-field with fields being (no-headers with nothing), name being "Cookie",
+            content being (cookie-name with nothing) plus "=xyz789"), body being ""
+    evaluate same-text with label being "the session id is read off the request",
+        actual being (session-id-of with request being carrying), expected being "xyz789"
+    give nothing
+end paragraph
+
+static-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.static.files"
+    value served is serve-file with root being "tests/public", path being "/assets/app.css"
+    evaluate same-number with label being "a file under the root is served", actual being served.code, expected being 200
+    evaluate same-text with label being "a stylesheet is typed as one",
+        actual being (field-value with fields being served.fields, name being "Content-Type"), expected being "text/css; charset=utf-8"
+    evaluate is-true with label being "the file content is the body",
+        actual being (nil.std.text::contains with s being served.body, needle being "rebeccapurple")
+
+    evaluate same-number with label being "climbing out of the root is a 404",
+        actual being (serve-file with root being "tests/public", path being "/../outside-root.txt").code, expected being 404
+    evaluate same-number with label being "a deeper climb is a 404",
+        actual being (serve-file with root being "tests/public", path being "/assets/../../outside-root.txt").code, expected being 404
+    evaluate same-number with label being "an absolute path is a 404",
+        actual being (serve-file with root being "tests/public", path being "//etc/hostname").code, expected being 404
+    evaluate same-number with label being "a dotfile is a 404 even though it exists",
+        actual being (serve-file with root being "tests/public", path being "/.hidden").code, expected being 404
+    evaluate is-true with label being "the name a probe actually asks for is refused by shape",
+        actual being not (is-safe-name with name being ".env")
+    evaluate is-true with label being "a nested environment file is refused by shape",
+        actual being not (is-safe-name with name being "config/.env.production")
+    evaluate same-number with label being "a missing file is a 404",
+        actual being (serve-file with root being "tests/public", path being "/nope.css").code, expected being 404
+    evaluate same-number with label being "the root itself is a 404",
+        actual being (serve-file with root being "tests/public", path being "/").code, expected being 404
+
+    evaluate is-true with label being "a backslash name is refused",
+        actual being not (is-safe-name with name being "assets\\..\\outside-root.txt")
+    evaluate is-true with label being "a drive-letter name is refused",
+        actual being not (is-safe-name with name being "C:/windows/system32")
+    evaluate is-true with label being "a doubled separator is refused",
+        actual being not (is-safe-name with name being "assets//app.css")
+    evaluate is-true with label being "a nested dotfile is refused",
+        actual being not (is-safe-name with name being "assets/.git/config")
+    evaluate is-true with label being "an ordinary name is allowed",
+        actual being (is-safe-name with name being "assets/app.css")
+
+    evaluate same-text with label being "an unknown extension is never HTML",
+        actual being (media-type-of with name being "upload.weird"), expected being "application/octet-stream"
+    evaluate same-text with label being "an extensionless name is never HTML",
+        actual being (media-type-of with name being "LICENSE"), expected being "application/octet-stream"
+    evaluate same-text with label being "a dot in a directory is not an extension",
+        actual being (media-type-of with name being "v1.2/README"), expected being "application/octet-stream"
+    evaluate same-text with label being "the extension folds case",
+        actual being (media-type-of with name being "LOGO.PNG"), expected being "image/png"
+    evaluate same-text with label being "javascript is typed",
+        actual being (media-type-of with name being "app.js"), expected being "text/javascript; charset=utf-8"
+    evaluate same-text with label being "a font is typed",
+        actual being (media-type-of with name being "inter.woff2"), expected being "font/woff2"
+
+    value cached is serve-cached with root being "tests/public", path being "/assets/app.css", seconds being 31536000
+    evaluate same-text with label being "a cached asset says how long",
+        actual being (field-value with fields being cached.fields, name being "Cache-Control"), expected being "public, max-age=31536000"
+    evaluate is-true with label being "a 404 is never given a cache lifetime",
+        actual being ((field-value with fields being (serve-cached with root being "tests/public",
+            path being "/nope.css", seconds being 60).fields, name being "Cache-Control")) equals ""
+    give nothing
+end paragraph
+
+middleware-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.middleware.chain"
+    variable guarded is new-chain with nothing
+    set guarded to with-guard with one-chain being guarded, kind being "require-host", setting being ""
+    set guarded to with-guard with one-chain being guarded, kind being "body-limit", setting being "10"
+
+    value hosted is make-request with verb being request-method.Get, target being "/",
+        fields being (set-field with fields being (no-headers with nothing), name being "Host", content being "example.com"),
+        body being ""
+    evaluate is-true with label being "a well-formed request passes the guards",
+        actual being not (run-guards with one-chain being guarded, request being hosted).stopped
+
+    value hostless is make-request with verb being request-method.Get, target being "/",
+        fields being (no-headers with nothing), body being ""
+    value refused is run-guards with one-chain being guarded, request being hostless
+    evaluate is-true with label being "a request with no Host is stopped", actual being refused.stopped
+    evaluate same-number with label being "a missing Host is a 400", actual being refused.response.code, expected being 400
+
+    value fat is make-request with verb being request-method.Post, target being "/",
+        fields being (set-field with fields being (no-headers with nothing), name being "Host", content being "example.com"),
+        body being "far more than ten bytes"
+    value too-big is run-guards with one-chain being guarded, request being fat
+    evaluate is-true with label being "an oversized body is stopped", actual being too-big.stopped
+    evaluate same-number with label being "an oversized body is a 413", actual being too-big.response.code, expected being 413
+
+    variable unwired is new-chain with nothing
+    set unwired to with-guard with one-chain being unwired, kind being "no-such-guard", setting being ""
+    value failed is run-guards with one-chain being unwired, request being hosted
+    evaluate is-true with label being "an unwired guard fails closed", actual being failed.stopped
+    evaluate same-number with label being "an unwired guard is a 500", actual being failed.response.code, expected being 500
+
+    variable finishing is new-chain with nothing
+    set finishing to with-finisher with one-chain being finishing, kind being "security-headers", setting being ""
+    set finishing to with-finisher with one-chain being finishing, kind being "server-name", setting being "nil-web"
+    set finishing to with-finisher with one-chain being finishing, kind being "header", setting being "X-Request-Id: abc"
+    value finished is run-finishers with one-chain being finishing, response being (text-response with body being "ok")
+    evaluate same-text with label being "nosniff is set",
+        actual being (field-value with fields being finished.fields, name being "X-Content-Type-Options"), expected being "nosniff"
+    evaluate same-text with label being "framing is denied",
+        actual being (field-value with fields being finished.fields, name being "X-Frame-Options"), expected being "DENY"
+    evaluate same-text with label being "a referrer policy is set",
+        actual being (field-value with fields being finished.fields, name being "Referrer-Policy"), expected being "no-referrer-when-downgrade"
+    evaluate same-text with label being "the server name is set",
+        actual being (field-value with fields being finished.fields, name being "Server"), expected being "nil-web"
+    evaluate same-text with label being "an arbitrary header is set",
+        actual being (field-value with fields being finished.fields, name being "X-Request-Id"), expected being "abc"
+    evaluate same-text with label being "the body is untouched", actual being finished.body, expected being "ok"
+
+    variable unknown-finisher is new-chain with nothing
+    set unknown-finisher to with-finisher with one-chain being unknown-finisher, kind being "no-such", setting being ""
+    evaluate same-text with label being "an unwired finisher leaves the response alone",
+        actual being (run-finishers with one-chain being unknown-finisher, response being (text-response with body being "ok")).body,
+        expected being "ok"
+    give nothing
+end paragraph
+
 main returns number begin paragraph
     say "nilweb tests"
     evaluate scan-tests with nothing
@@ -399,5 +717,9 @@ main returns number begin paragraph
     evaluate request-tests with nothing
     evaluate response-tests with nothing
     evaluate router-tests with nothing
+    evaluate template-tests with nothing
+    evaluate session-tests with nothing
+    evaluate static-tests with nothing
+    evaluate middleware-tests with nothing
     give verdict with nothing
 end paragraph

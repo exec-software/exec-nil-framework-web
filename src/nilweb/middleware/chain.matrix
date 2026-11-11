@@ -1,0 +1,241 @@
+!!! Middleware: what happens to every request and every response.
+!!!
+!!! Not a chain of wrapped callables. Matrix has no capturing closures, so the
+!!! `next(request)` shape that every other framework uses cannot be written —
+!!! there is nothing to capture `next` in. What replaces it is two lists: one
+!!! of checks that run before a handler and may answer instead of it, and one
+!!! of changes applied to whatever response comes back.
+!!!
+!!! That is less general. A middleware cannot run code on the way out that
+!!! depends on a local it set on the way in, and it cannot wrap a handler in
+!!! an `attempt`. What it is instead is explicit: the whole of what happens
+!!! around a handler is two arrays you can print.
+!!!
+!!! Both lists name their behaviour with text, for the same reason routes name
+!!! handlers with text. See nilweb.routing.router for the long version.
+
+book nilweb.middleware.chain
+
+read nil.std.core
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.http.method
+read everything from nilweb.http.status
+read everything from nilweb.http.headers
+read everything from nilweb.http.request
+read everything from nilweb.http.response
+
+
+!!! --- A check that runs before the handler.
+!!!
+!!! `setting` is the one argument the check needs — the allowed origin, the
+!!! realm, the byte ceiling. One argument rather than a general bag because
+!!! every check here wants exactly none or one, and a bag would be a map that
+!!! Matrix cannot index anyway.
+
+public guard begin record
+    field kind as text
+    field setting as text
+end record
+
+
+!!! --- A change applied to the response on the way out.
+
+public finisher begin record
+    field kind as text
+    field setting as text
+end record
+
+
+public chain begin record
+    field guards as array of guard
+    field finishers as array of finisher
+end record
+
+
+public new-chain returns chain begin paragraph
+    variable guards as array of guard is []
+    variable finishers as array of finisher is []
+    give build chain with guards being guards, finishers being finishers
+end paragraph
+
+
+public with-guard receives one-chain as chain, kind as text, setting as text returns chain begin paragraph
+    variable guards as array of guard is []
+    repeat for each existing in one-chain.guards
+        append existing to guards
+    end repeat
+    append build guard with kind being kind, setting being setting to guards
+    give build chain with guards being guards, finishers being one-chain.finishers
+end paragraph
+
+
+public with-finisher receives one-chain as chain, kind as text, setting as text returns chain begin paragraph
+    variable finishers as array of finisher is []
+    repeat for each existing in one-chain.finishers
+        append existing to finishers
+    end repeat
+    append build finisher with kind being kind, setting being setting to finishers
+    give build chain with guards being one-chain.guards, finishers being finishers
+end paragraph
+
+
+!!! --- The outcome of running the guards.
+!!! `stopped` true means the response is the answer and the handler must not run.
+
+public guard-result begin record
+    field stopped as boolean
+    field response as http-response
+end record
+
+
+!!! --- Run every guard in order. The first to object answers.
+
+public run-guards receives one-chain as chain, request as http-request returns guard-result begin paragraph
+    repeat for each each-guard in one-chain.guards
+        value verdict is run-one-guard with the-guard being each-guard, request being request
+        when verdict.stopped then
+            give verdict
+        end when
+    end repeat
+    give build guard-result with stopped being false, response being (empty-response with code being status-ok)
+end paragraph
+
+
+run-one-guard receives the-guard as guard, request as http-request returns guard-result begin paragraph
+    give switch the-guard.kind
+        case "require-host" then
+            stop switching with (require-host with request being request)
+        case "body-limit" then
+            stop switching with (body-limit with request being request, setting being the-guard.setting)
+        case "require-form" then
+            stop switching with (require-form with request being request)
+        case "block-method" then
+            stop switching with (block-method with request being request, setting being the-guard.setting)
+        otherwise
+            !!! A guard nobody wired is a configuration mistake, and a
+            !!! configuration mistake in a security check must fail closed.
+            stop switching with (stopped-with with response being
+                (error-response with code being status-internal-error,
+                    explanation being "No guard is wired for the name " plus quote plus the-guard.kind plus quote))
+    end switch
+end paragraph
+
+
+!!! --- HTTP/1.1 requires a Host, and a request without one cannot be routed
+!!! to a virtual host or safely used to build an absolute URL.
+
+require-host receives request as http-request returns guard-result begin paragraph
+    when (host-of with request being request) equals "" then
+        give stopped-with with response being (error-response with code being status-bad-request,
+            explanation being "HTTP/1.1 requires a Host header")
+    end when
+    give carry-on with nothing
+end paragraph
+
+
+!!! --- Refuse a body past a ceiling, before a handler parses it.
+
+body-limit receives request as http-request, setting as text returns guard-result begin paragraph
+    value ceiling is nil.std.core::text_to_i32 with `value` being setting
+    when (body-length with request being request) is greater than ceiling then
+        give stopped-with with response being (error-response with code being status-payload-too-large,
+            explanation being "The body is larger than this route accepts")
+    end when
+    give carry-on with nothing
+end paragraph
+
+
+require-form receives request as http-request returns guard-result begin paragraph
+    value verb is method-name with verb being request.verb
+    value writes is verb equals "POST" or verb equals "PUT" or verb equals "PATCH"
+    when writes and not (is-form-encoded with request being request) then
+        give stopped-with with response being (error-response with code being status-unsupported-media-type,
+            explanation being "Send application/x-www-form-urlencoded")
+    end when
+    give carry-on with nothing
+end paragraph
+
+
+block-method receives request as http-request, setting as text returns guard-result begin paragraph
+    when (method-name with verb being request.verb) equals (nil.std.text::to_upper with s being setting) then
+        give stopped-with with response being (error-response with code being status-method-not-allowed,
+            explanation being "That method is not accepted here")
+    end when
+    give carry-on with nothing
+end paragraph
+
+
+stopped-with receives response as http-response returns guard-result begin paragraph
+    give build guard-result with stopped being true, response being response
+end paragraph
+
+
+carry-on returns guard-result begin paragraph
+    give build guard-result with stopped being false, response being (empty-response with code being status-ok)
+end paragraph
+
+
+!!! --- Apply every finisher to the response, in order.
+
+public run-finishers receives one-chain as chain, response as http-response returns http-response begin paragraph
+    variable out is response
+    repeat for each each-finisher in one-chain.finishers
+        set out to run-one-finisher with the-finisher being each-finisher, response being out
+    end repeat
+    give out
+end paragraph
+
+
+run-one-finisher receives the-finisher as finisher, response as http-response returns http-response begin paragraph
+    give switch the-finisher.kind
+        case "server-name" then
+            stop switching with (with-header with response being response, name being "Server",
+                content being the-finisher.setting)
+        case "security-headers" then
+            stop switching with (security-headers with response being response)
+        case "cache-control" then
+            stop switching with (with-header with response being response, name being "Cache-Control",
+                content being the-finisher.setting)
+        case "allow-origin" then
+            stop switching with (with-header with response being response,
+                name being "Access-Control-Allow-Origin", content being the-finisher.setting)
+        case "header" then
+            stop switching with (named-header with response being response, setting being the-finisher.setting)
+        otherwise
+            !!! Unlike a guard, an unknown finisher leaves the response alone.
+            !!! A missing header is a weaker outcome than a 500 on every page.
+            stop switching with response
+    end switch
+end paragraph
+
+
+!!! --- The headers worth setting on every response.
+!!!
+!!! nosniff stops a browser second-guessing the Content-Type that
+!!! nilweb.static.files was careful about. DENY stops the page being framed,
+!!! which is clickjacking. no-referrer-when-downgrade keeps the path out of
+!!! the Referer sent to a plain-HTTP third party. None of them replace a
+!!! Content-Security-Policy, which is the application's to write because only
+!!! the application knows what it loads.
+
+security-headers receives response as http-response returns http-response begin paragraph
+    variable out is response
+    set out to with-header with response being out, name being "X-Content-Type-Options", content being "nosniff"
+    set out to with-header with response being out, name being "X-Frame-Options", content being "DENY"
+    set out to with-header with response being out, name being "Referrer-Policy",
+        content being "no-referrer-when-downgrade"
+    give out
+end paragraph
+
+
+!!! --- An arbitrary header, spelled "Name: value" in the setting.
+
+named-header receives response as http-response, setting as text returns http-response begin paragraph
+    value name is nil.std.text::trim with s being (before-first with input being setting, separator being ":")
+    value content is nil.std.text::trim with s being (after-first with input being setting, separator being ":")
+    when name equals "" then
+        give response
+    end when
+    give with-header with response being response, name being name, content being content
+end paragraph

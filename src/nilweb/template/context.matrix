@@ -1,0 +1,189 @@
+!!! The data a template renders against.
+!!!
+!!! A template cannot run Matrix. There is no evaluator at runtime — no `eval`,
+!!! no reflection over locals — so `<%= user.name %>` cannot mean "evaluate
+!!! this expression". It means "look this name up", and the page-data is where
+!!! the handler puts the answers before rendering.
+!!!
+!!! That is a narrower contract than NyWeb's, where a template held Ny
+!!! expressions that the C++ engine parsed and the runtime evaluated. It is
+!!! also a sturdier one: a template can only read what the handler decided to
+!!! publish, so a template cannot reach into a session, open a file or call a
+!!! service, and reviewing what a page can see is reading one paragraph.
+
+book nilweb.template.context
+
+read nil.std.text
+
+
+public binding begin record
+    field name as text
+    field content as text
+end record
+
+
+!!! --- One row of a repeated section, with its own bindings.
+
+public row begin record
+    field cells as array of binding
+end record
+
+
+public row-set begin record
+    field name as text
+    field rows as array of row
+end record
+
+
+public render-context begin record
+    field bindings as array of binding
+    field sets as array of row-set
+end record
+
+
+public empty-context returns render-context begin paragraph
+    variable bindings as array of binding is []
+    variable sets as array of row-set is []
+    give build render-context with bindings being bindings, sets being sets
+end paragraph
+
+
+!!! --- Publish one name. A later binding of the same name replaces an earlier
+!!! one, so building a page-data reads as a list of decisions rather than a set
+!!! of traps.
+
+public with-value receives page-data as render-context, name as text, content as text
+    returns render-context begin paragraph
+    variable bindings as array of binding is []
+    repeat for each existing in page-data.bindings
+        when not (existing.name equals name) then
+            append existing to bindings
+        end when
+    end repeat
+    append build binding with name being name, content being content to bindings
+    give build render-context with bindings being bindings, sets being page-data.sets
+end paragraph
+
+
+public with-number receives page-data as render-context, name as text, amount as number
+    returns render-context begin paragraph
+    give with-value with page-data being page-data, name being name, content being (amount becomes text)
+end paragraph
+
+
+public with-flag receives page-data as render-context, name as text, held as boolean
+    returns render-context begin paragraph
+    give with-value with page-data being page-data, name being name,
+        content being (when held give "true" otherwise give "" end when)
+end paragraph
+
+
+!!! --- Publish a repeated section, for `<% for one in name %>`.
+
+public with-rows receives page-data as render-context, name as text, rows as array of row
+    returns render-context begin paragraph
+    variable sets as array of row-set is []
+    repeat for each existing in page-data.sets
+        when not (existing.name equals name) then
+            append existing to sets
+        end when
+    end repeat
+    append build row-set with name being name, rows being rows to sets
+    give build render-context with bindings being page-data.bindings, sets being sets
+end paragraph
+
+
+public no-rows returns array of row begin paragraph
+    variable empty as array of row is []
+    give empty
+end paragraph
+
+
+public new-row returns row begin paragraph
+    variable cells as array of binding is []
+    give build row with cells being cells
+end paragraph
+
+
+public row-with receives one-row as row, name as text, content as text returns row begin paragraph
+    variable cells as array of binding is []
+    repeat for each existing in one-row.cells
+        when not (existing.name equals name) then
+            append existing to cells
+        end when
+    end repeat
+    append build binding with name being name, content being content to cells
+    give build row with cells being cells
+end paragraph
+
+
+public add-row receives rows as array of row, one-row as row returns array of row begin paragraph
+    variable out as array of row is []
+    repeat for each existing in rows
+        append existing to out
+    end repeat
+    append one-row to out
+    give out
+end paragraph
+
+
+!!! --- Read a name. An unknown name is "" rather than an error, because a
+!!! template that mentions a name the handler did not set is a template bug
+!!! that should show as a gap on the page, not take the request down.
+
+public value-of receives page-data as render-context, name as text returns text begin paragraph
+    repeat for each existing in page-data.bindings
+        when existing.name equals name then
+            give existing.content
+        end when
+    end repeat
+    give ""
+end paragraph
+
+
+public has-name receives page-data as render-context, name as text returns boolean begin paragraph
+    repeat for each existing in page-data.bindings
+        when existing.name equals name then
+            give true
+        end when
+    end repeat
+    give false
+end paragraph
+
+
+!!! --- Whether `<% if name %>` takes its branch.
+!!!
+!!! Absent, empty, "false", "0" and "no" are false; everything else is true.
+!!! Spelling the false words out rather than treating any non-empty text as
+!!! true means `with-flag` and a handler that formats its own "false" agree,
+!!! which they otherwise would not.
+
+public is-set receives page-data as render-context, name as text returns boolean begin paragraph
+    value held is value-of with page-data being page-data, name being name
+    value folded is nil.std.text::to_lower with s being held
+    give not (folded equals "" or folded equals "false" or folded equals "0" or folded equals "no")
+end paragraph
+
+
+public rows-of receives page-data as render-context, name as text returns array of row begin paragraph
+    repeat for each existing in page-data.sets
+        when existing.name equals name then
+            give existing.rows
+        end when
+    end repeat
+    give no-rows with nothing
+end paragraph
+
+
+!!! --- A page-data with one row's cells published under a prefix, which is how
+!!! `<% for user in users %><%= user.name %>` resolves.
+
+public with-row-bound receives page-data as render-context, prefix as text, one-row as row
+    returns render-context begin paragraph
+    variable out is page-data
+    repeat for each cell in one-row.cells
+        set out to with-value with page-data being out, name being prefix plus "." plus cell.name,
+            content being cell.content
+    end repeat
+    give out
+end paragraph

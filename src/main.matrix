@@ -1,10 +1,11 @@
 !!! nil-web, demonstrated.
 !!!
 !!! A whole request/response cycle with no socket in it: a request arrives as
-!!! text, the router picks a handler, the handler builds a response, and the
+!!! text, the guards run, the router picks a handler, the handler builds a
+!!! response from a template, the finishers add their headers, and the
 !!! response is rendered back to text. That is the entire framework, and it is
-!!! deliberately the entire framework — the transport calls `answer` with
-!!! whatever it read off the wire and writes back what it gets.
+!!! deliberately the entire framework — whatever ends up accepting connections
+!!! calls `answer` with what it read and writes back what it gets.
 !!!
 !!! The dispatch below is the shape every application using this takes: a
 !!! route table of names, and one `switch` that turns a name into a call.
@@ -21,6 +22,18 @@ read everything from nilweb.http.request
 read everything from nilweb.http.response
 read everything from nilweb.http.uri
 read everything from nilweb.routing.router
+read everything from nilweb.template.context
+read everything from nilweb.template.render
+read everything from nilweb.session.session
+read everything from nilweb.static.files
+read everything from nilweb.middleware.chain
+
+
+!!! Where the templates and the public files live, relative to the working
+!!! directory the program is started in.
+constant template-root as text is "web"
+constant public-root as text is "web/public"
+constant site-name as text is "nil-web"
 
 
 !!! --- The application's route table.
@@ -28,10 +41,24 @@ read everything from nilweb.routing.router
 demo-routes returns array of route begin paragraph
     variable routes is no-routes with nothing
     set routes to get-route with routes being routes, pattern being "/", handler being "home"
+    set routes to get-route with routes being routes, pattern being "/posts", handler being "posts"
     set routes to get-route with routes being routes, pattern being "/hello/:name", handler being "hello"
     set routes to get-route with routes being routes, pattern being "/search", handler being "search"
+    set routes to get-route with routes being routes, pattern being "/assets/*rest", handler being "asset"
     set routes to post-route with routes being routes, pattern being "/users", handler being "create-user"
     give routes
+end paragraph
+
+
+!!! --- What runs around every handler.
+
+demo-chain returns chain begin paragraph
+    variable built is new-chain with nothing
+    set built to with-guard with one-chain being built, kind being "require-host", setting being ""
+    set built to with-guard with one-chain being built, kind being "body-limit", setting being "65536"
+    set built to with-finisher with one-chain being built, kind being "security-headers", setting being ""
+    set built to with-finisher with one-chain being built, kind being "server-name", setting being "nil-web"
+    give built
 end paragraph
 
 
@@ -44,19 +71,26 @@ public answer receives raw as text returns text begin paragraph
             (error-response with code being status-bad-request, explanation being request.complaint)
     end when
 
+    value around is demo-chain with nothing
+    value checked is run-guards with one-chain being around, request being request
+    when checked.stopped then
+        give render-response with response being (run-finishers with one-chain being around,
+            response being checked.response), verb being request.verb
+    end when
+
     value found is match-route with routes being (demo-routes with nothing),
         verb being request.verb, path being request.path
 
-    when not found.matched then
-        value refusal is when found.path-matched
-            give method-not-allowed-response with allowed being found.allowed
-            otherwise give not-found-response with path being request.path
-        end when
-        give render-response with response being refusal, verb being request.verb
+    value answered is when found.matched
+        give (run-handler with name being found.handler, request being request, found being found)
+        otherwise give (when found.path-matched
+            give (method-not-allowed-response with allowed being found.allowed)
+            otherwise give (not-found-response with path being request.path)
+        end when)
     end when
 
-    give render-response with response being (run-handler with name being found.handler,
-        request being request, found being found), verb being request.verb
+    give render-response with response being (run-finishers with one-chain being around, response being answered),
+        verb being request.verb
 end paragraph
 
 
@@ -68,11 +102,15 @@ run-handler receives name as text, request as http-request, found as route-resul
     returns http-response begin paragraph
     give switch name
         case "home" then
-            stop switching with (home-page with nothing)
+            stop switching with (home-page with request being request)
+        case "posts" then
+            stop switching with (posts-page with request being request)
         case "hello" then
             stop switching with (hello-page with found being found)
         case "search" then
             stop switching with (search-page with request being request)
+        case "asset" then
+            stop switching with (asset-file with found being found)
         case "create-user" then
             stop switching with (create-user with request being request)
         otherwise
@@ -82,17 +120,63 @@ run-handler receives name as text, request as http-request, found as route-resul
 end paragraph
 
 
-home-page returns http-response begin paragraph
-    give html-response with body being "<!doctype html>" plus newline
-        plus "<title>nil-web</title>" plus newline
-        plus "<h1>nil-web</h1>" plus newline
-        plus "<p>A web framework in Matrix.</p>" plus newline
+!!! --- The data every page needs: who is reading, and what to call the site.
+
+page-shell receives request as http-request, title as text returns render-context begin paragraph
+    variable page-data is empty-context with nothing
+    set page-data to with-value with page-data being page-data, name being "site", content being site-name
+    set page-data to with-value with page-data being page-data, name being "title", content being title
+    value who is session-id-of with request being request
+    set page-data to with-flag with page-data being page-data, name being "signed-in", held being not (who equals "")
+    set page-data to with-value with page-data being page-data, name being "who", content being who
+    give page-data
+end paragraph
+
+
+!!! --- Render a template, or say plainly that it could not be rendered.
+!!!
+!!! A template fault is a 500 with its complaint, not a half-page. A page that
+!!! renders its first half and then stops is the hardest kind of bug to see.
+
+rendered-page receives name as text, page-data as render-context returns http-response begin paragraph
+    value outcome is render-file with name being name, page-data being page-data, root being template-root
+    when not outcome.rendered then
+        give error-response with code being status-internal-error,
+            explanation being "Template " plus name plus ": " plus outcome.complaint
+    end when
+    give html-response with body being outcome.text-out
+end paragraph
+
+
+home-page receives request as http-request returns http-response begin paragraph
+    variable page-data is page-shell with request being request, title being "Home"
+    set page-data to with-value with page-data being page-data, name being "heading", content being "nil-web"
+    give rendered-page with name being "home.nilhtml", page-data being page-data
+end paragraph
+
+
+posts-page receives request as http-request returns http-response begin paragraph
+    variable page-data is page-shell with request being request, title being "Posts"
+    variable rows is no-rows with nothing
+    set rows to add-row with rows being rows, one-row being (post-row with title being "Matrix has no closures",
+        slug being "no-closures")
+    set rows to add-row with rows being rows, one-row being (post-row with title being "Why there is no server yet",
+        slug being "no-server")
+    set page-data to with-rows with page-data being page-data, name being "posts", rows being rows
+    set page-data to with-flag with page-data being page-data, name being "any", held being (the length of rows) is greater than 0
+    give rendered-page with name being "posts.nilhtml", page-data being page-data
+end paragraph
+
+
+post-row receives title as text, slug as text returns row begin paragraph
+    give row-with with one-row being (row-with with one-row being (new-row with nothing),
+        name being "title", content being title), name being "slug", content being slug
 end paragraph
 
 
 hello-page receives found as route-result returns http-response begin paragraph
     value who is capture-of with result being found, name being "name"
-    give html-response with body being "<h1>Hello, " plus who plus "</h1>" plus newline
+    give html-response with body being "<h1>Hello, " plus (escape-html with raw being who) plus "</h1>" plus newline
 end paragraph
 
 
@@ -102,6 +186,12 @@ search-page receives request as http-request returns http-response begin paragra
         give error-response with code being status-bad-request, explanation being "Pass a search term as ?q="
     end when
     give text-response with body being "Searching for: " plus term plus newline
+end paragraph
+
+
+asset-file receives found as route-result returns http-response begin paragraph
+    value rest is capture-of with result being found, name being "rest"
+    give serve-cached with root being public-root, path being "assets/" plus rest, seconds being 3600
 end paragraph
 
 
@@ -139,21 +229,25 @@ end paragraph
 main returns number begin paragraph
     say "nil-web demonstration: requests in, responses out, no socket."
 
-    evaluate show with title being "GET /",
+    evaluate show with title being "GET / (template, layout, partial)",
         raw being (wire-request with line being "GET / HTTP/1.1", fields being "Host: localhost", body being "")
-    evaluate show with title being "GET /hello/ada",
-        raw being (wire-request with line being "GET /hello/ada HTTP/1.1", fields being "Host: localhost", body being "")
-    evaluate show with title being "GET /search?q=matrix+web",
-        raw being (wire-request with line being "GET /search?q=matrix+web HTTP/1.1", fields being "Host: localhost", body being "")
-    evaluate show with title being "GET /search (no term)",
-        raw being (wire-request with line being "GET /search HTTP/1.1", fields being "Host: localhost", body being "")
-    evaluate show with title being "POST /users",
+    evaluate show with title being "GET /posts (a loop over rows)",
+        raw being (wire-request with line being "GET /posts HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "GET /assets/app.css (a static file)",
+        raw being (wire-request with line being "GET /assets/app.css HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "GET /assets/../../outside (traversal, refused)",
+        raw being (wire-request with line being "GET /assets/../../nil.project.nildata HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "GET /hello/<script> (escaping)",
+        raw being (wire-request with line being "GET /hello/%3Cscript%3E HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "POST /users (form, then redirect)",
         raw being (wire-request with line being "POST /users HTTP/1.1",
             fields being "Host: localhost" plus (crlf with nothing) plus "Content-Type: application/x-www-form-urlencoded",
             body being "name=Ada+Lovelace")
+    evaluate show with title being "GET / with no Host (guard stops it)",
+        raw being (wire-request with line being "GET / HTTP/1.1", fields being "Accept: text/html", body being "")
     evaluate show with title being "DELETE /users (wrong method)",
         raw being (wire-request with line being "DELETE /users HTTP/1.1", fields being "Host: localhost", body being "")
-    evaluate show with title being "GET /nowhere",
+    evaluate show with title being "GET /nowhere (no route)",
         raw being (wire-request with line being "GET /nowhere HTTP/1.1", fields being "Host: localhost", body being "")
     give 0
 end paragraph

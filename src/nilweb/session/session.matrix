@@ -1,0 +1,260 @@
+!!! Sessions: server-side state keyed by a cookie.
+!!!
+!!! READ THIS BEFORE USING IT IN PRODUCTION.
+!!!
+!!! This module does not generate session identifiers, and that is deliberate.
+!!! A session id is a bearer credential: anyone holding one is the user. It
+!!! must come from a cryptographically secure source, and there is no such
+!!! source reachable from Matrix today:
+!!!
+!!!   * nil.std.math is MINSTD, a 31-bit linear congruential generator whose
+!!!     global stream starts at the seed 12345. Its own documentation says
+!!!     "neither API is cryptographic". Two draws reveal the stream.
+!!!   * nil.std.security has base64 and hex, and no hash, no HMAC, no random.
+!!!   * The runtime has no crypto or random intrinsic of any kind.
+!!!   * /dev/urandom cannot be read: file.read_regular_bytes refuses a
+!!!     character device by design, and file.read_bytes returns empty for one.
+!!!
+!!! So `start-session` takes the id from its caller, and the caller is
+!!! expected to get it from the same native shim that will be providing the
+!!! socket — `getrandom(2)` is one more export on a library that has to exist
+!!! anyway. `development-id` below exists so the tests and the demo can run,
+!!! is named so it cannot be used by accident, and says what it is.
+!!!
+!!! Everything else here — expiry, the store, and above all the cookie
+!!! attributes — is the part that can be got right today, and is.
+
+book nilweb.session.session
+
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.http.headers
+read everything from nilweb.http.request
+read everything from nilweb.http.response
+
+
+public session-value begin record
+    field name as text
+    field content as text
+end record
+
+
+public session begin record
+    field id as text
+    field values-held as array of session-value
+    !!! Milliseconds since the epoch, as `now in milliseconds` reports them.
+    field expires-at as number
+end record
+
+
+public session-store begin record
+    field sessions as array of session
+    !!! How long a session lives from its last touch, in milliseconds.
+    field lifetime as number
+end record
+
+
+!!! --- A store. One hour is the default lifetime: long enough that a form
+!!! does not expire while it is being filled in, short enough that a shared
+!!! machine does not stay logged in all afternoon.
+
+public new-store returns session-store begin paragraph
+    variable sessions as array of session is []
+    give build session-store with sessions being sessions, lifetime being 3600000
+end paragraph
+
+
+public store-with-lifetime receives store as session-store, lifetime as number returns session-store begin paragraph
+    give build session-store with sessions being store.sessions, lifetime being lifetime
+end paragraph
+
+
+!!! --- Begin a session under an id the caller supplies.
+!!!
+!!! `now` is passed in rather than read here, so a test can place a session in
+!!! time without waiting for the clock and so one request's handling uses one
+!!! consistent instant throughout.
+
+public start-session receives store as session-store, id as text, now-at as number
+    returns session-store begin paragraph
+    variable sessions as array of session is []
+    repeat for each existing in store.sessions
+        when not (existing.id equals id) then
+            append existing to sessions
+        end when
+    end repeat
+    variable values-held as array of session-value is []
+    append build session with id being id, values-held being values-held,
+        expires-at being now-at plus store.lifetime to sessions
+    give build session-store with sessions being sessions, lifetime being store.lifetime
+end paragraph
+
+
+!!! --- Whether a live session exists under this id.
+!!! An expired session is not found, which is the same answer as never having
+!!! existed — a client must not be able to tell the difference.
+
+public has-session receives store as session-store, id as text, now-at as number returns boolean begin paragraph
+    repeat for each existing in store.sessions
+        when existing.id equals id and existing.expires-at is greater than now-at then
+            give true
+        end when
+    end repeat
+    give false
+end paragraph
+
+
+public value-in receives store as session-store, id as text, name as text, now-at as number
+    returns text begin paragraph
+    repeat for each existing in store.sessions
+        when existing.id equals id and existing.expires-at is greater than now-at then
+            repeat for each held in existing.values-held
+                when held.name equals name then
+                    give held.content
+                end when
+            end repeat
+            give ""
+        end when
+    end repeat
+    give ""
+end paragraph
+
+
+!!! --- Put a value in a session, and push its expiry out by the lifetime.
+!!!
+!!! Writing counts as activity. A session that only ever reads does not renew,
+!!! which is a deliberate choice: a page left open in a background tab should
+!!! not keep a session alive forever.
+
+public set-in receives store as session-store, id as text, name as text, content as text, now-at as number
+    returns session-store begin paragraph
+    variable sessions as array of session is []
+    repeat for each existing in store.sessions
+        !!! Flat rather than nested: a branch holding its own `when` needs an
+        !!! explicit arm block, and two conditions read better than one with
+        !!! a tail. Expired sessions are dropped on the way past.
+        value live is existing.expires-at is greater than now-at
+        value target is existing.id equals id and live
+        when target then
+            variable values-held as array of session-value is []
+            repeat for each held in existing.values-held
+                when not (held.name equals name) then
+                    append held to values-held
+                end when
+            end repeat
+            append build session-value with name being name, content being content to values-held
+            append build session with id being existing.id, values-held being values-held,
+                expires-at being now-at plus store.lifetime to sessions
+        end when
+        when live and not target then
+            append existing to sessions
+        end when
+    end repeat
+    give build session-store with sessions being sessions, lifetime being store.lifetime
+end paragraph
+
+
+!!! --- End a session. Used on sign-out, and the half of the job that matters:
+!!! the other half is overwriting the cookie, which `ended-cookie` does.
+
+public end-session receives store as session-store, id as text returns session-store begin paragraph
+    variable sessions as array of session is []
+    repeat for each existing in store.sessions
+        when not (existing.id equals id) then
+            append existing to sessions
+        end when
+    end repeat
+    give build session-store with sessions being sessions, lifetime being store.lifetime
+end paragraph
+
+
+!!! --- Drop everything that has expired. Nothing requires this to be called —
+!!! an expired session is already invisible — but a long-running process that
+!!! never calls it keeps every session it ever made.
+
+public sweep-expired receives store as session-store, now-at as number returns session-store begin paragraph
+    variable sessions as array of session is []
+    repeat for each existing in store.sessions
+        when existing.expires-at is greater than now-at then
+            append existing to sessions
+        end when
+    end repeat
+    give build session-store with sessions being sessions, lifetime being store.lifetime
+end paragraph
+
+
+public live-count receives store as session-store, now-at as number returns number begin paragraph
+    variable total as number is 0
+    repeat for each existing in store.sessions
+        when existing.expires-at is greater than now-at then
+            set total to total plus 1
+        end when
+    end repeat
+    give total
+end paragraph
+
+
+public cookie-name returns text begin paragraph
+    give "nilweb_session"
+end paragraph
+
+
+!!! --- The session id a request carries, or "" when it carries none.
+
+public session-id-of receives request as http-request returns text begin paragraph
+    give cookie-of with request being request, name being (cookie-name with nothing)
+end paragraph
+
+
+!!! --- Attach the session cookie to a response.
+!!!
+!!! The attributes are not configurable and that is the point. HttpOnly keeps
+!!! the id out of document.cookie, so a cross-site script cannot read it.
+!!! SameSite=Lax keeps it off cross-site POSTs, which is most of CSRF.
+!!! Path=/ scopes it to the application. Max-Age matches the store's lifetime
+!!! so the browser forgets it when the server does.
+!!!
+!!! `secure` is the one choice left to the caller, because a cookie marked
+!!! Secure is not sent over plain HTTP and development is usually plain HTTP.
+!!! Pass true everywhere a real user will ever reach.
+
+public with-session-cookie receives response as http-response, id as text, store as session-store,
+    secure as boolean returns http-response begin paragraph
+    value seconds is store.lifetime over 1000
+    variable attributes as text is "Path=/; HttpOnly; SameSite=Lax; Max-Age=" plus (seconds becomes text)
+    when secure then
+        set attributes to attributes plus "; Secure"
+    end when
+    give with-cookie with response being response, name being (cookie-name with nothing),
+        content being id, attributes being attributes
+end paragraph
+
+
+!!! --- Overwrite the cookie so the browser drops it, for sign-out.
+!!! Max-Age=0 and an empty value, with the same attributes: a cookie is only
+!!! replaced by one whose path and name match.
+
+public with-ended-cookie receives response as http-response, secure as boolean returns http-response begin paragraph
+    variable attributes as text is "Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+    when secure then
+        set attributes to attributes plus "; Secure"
+    end when
+    give with-cookie with response being response, name being (cookie-name with nothing),
+        content being "", attributes being attributes
+end paragraph
+
+
+!!! --- A session id for development and tests. NOT A CREDENTIAL.
+!!!
+!!! Derived from a counter and a caller-supplied number, so it is unique
+!!! within one run and entirely predictable from outside it. Anyone who can
+!!! guess the time your process started can guess every id it will ever issue.
+!!! It is here so the demo runs, and it is named so that `development-id`
+!!! appearing in a production diff is the review comment writing itself.
+
+public variable issued as number is 0
+
+public development-id receives now-at as number returns text begin paragraph
+    set nilweb.session.session::issued to nilweb.session.session::issued plus 1
+    give "dev-" plus (now-at becomes text) plus "-" plus (nilweb.session.session::issued becomes text)
+end paragraph

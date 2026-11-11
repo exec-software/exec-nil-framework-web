@@ -1,0 +1,1 @@
+A file outside the static root. The traversal checks aim at this.
