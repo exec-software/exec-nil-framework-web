@@ -1,0 +1,274 @@
+!!! Routing: which handler answers a path.
+!!!
+!!! A route names its handler with text, and the application dispatches on
+!!! that name. This is not the shape the Ny original had — there a route held
+!!! an IPage object and the router called it — and the reason it changed is
+!!! the language: Matrix has no capturing closures, and an array of class
+!!! handles compiles but does not execute. There is no way to put a callable
+!!! in a route table. A name is the thing that can be stored, compared and
+!!! switched on, so a name is what a route holds.
+!!!
+!!! What this costs is one `switch` in the application that lists its
+!!! handlers. What it buys is a route table that is plain data: it can be
+!!! read, printed, tested and reordered without running anything, and a
+!!! mistyped handler name is a 500 with a message rather than a crash.
+
+book nilweb.routing.router
+
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.http.method
+read everything from nilweb.http.uri
+
+
+public route begin record
+    field verb as request-method
+    !!! A pattern is literal segments, `:name` captures and a trailing `*name`.
+    field pattern as text
+    !!! The name the application switches on to run this route.
+    field handler as text
+end record
+
+
+!!! --- The outcome of matching one request against the whole table.
+!!!
+!!! `path-matched` is separate from `matched` so the caller can tell 404 from
+!!! 405. A path no route claims is Not Found; a path a route claims by another
+!!! method is Method Not Allowed, and RFC 9110 requires that answer to carry
+!!! an Allow field — which is why `allowed` is here and not reconstructed by
+!!! the caller.
+
+public route-result begin record
+    field matched as boolean
+    field handler as text
+    field captures as array of query-parameter
+    field path-matched as boolean
+    field allowed as text
+end record
+
+
+public no-routes returns array of route begin paragraph
+    variable empty as array of route is []
+    give empty
+end paragraph
+
+
+public add-route receives routes as array of route, verb as request-method, pattern as text, handler as text
+    returns array of route begin paragraph
+    variable out as array of route is []
+    repeat for each existing in routes
+        append existing to out
+    end repeat
+    append build route with verb being verb, pattern being pattern, handler being handler to out
+    give out
+end paragraph
+
+
+public get-route receives routes as array of route, pattern as text, handler as text returns array of route begin paragraph
+    give add-route with routes being routes, verb being request-method.Get, pattern being pattern, handler being handler
+end paragraph
+
+
+public post-route receives routes as array of route, pattern as text, handler as text returns array of route begin paragraph
+    give add-route with routes being routes, verb being request-method.Post, pattern being pattern, handler being handler
+end paragraph
+
+
+public put-route receives routes as array of route, pattern as text, handler as text returns array of route begin paragraph
+    give add-route with routes being routes, verb being request-method.Put, pattern being pattern, handler being handler
+end paragraph
+
+
+public delete-route receives routes as array of route, pattern as text, handler as text returns array of route begin paragraph
+    give add-route with routes being routes, verb being request-method.Delete, pattern being pattern, handler being handler
+end paragraph
+
+
+!!! --- Match a request against the table, first route wins.
+!!!
+!!! In declaration order rather than by specificity. Specificity ordering is
+!!! clever and surprising — it decides that `/users/new` loses to `/users/:id`
+!!! on a rule the person writing the table cannot see — and declaration order
+!!! is the one a reader can check by reading downwards.
+!!!
+!!! A HEAD request matches a GET route, because a HEAD is a GET whose body is
+!!! discarded, and a table that had to repeat every route for HEAD would be a
+!!! table with half its entries wrong.
+
+public match-route receives routes as array of route, verb as request-method, path as text
+    returns route-result begin paragraph
+    variable allowed as text is ""
+    variable path-matched as boolean is false
+
+    repeat for each candidate in routes
+        value attempt-made is match-pattern with pattern being candidate.pattern, path being path
+        when attempt-made.matched then
+            set path-matched to true
+            when methods-agree with wanted being verb, offered being candidate.verb then
+                give build route-result with
+                    matched being true,
+                    handler being candidate.handler,
+                    captures being attempt-made.captures,
+                    path-matched being true,
+                    allowed being ""
+            end when
+            set allowed to add-to-allowed with allowed being allowed, verb being candidate.verb
+        end when
+    end repeat
+
+    give build route-result with
+        matched being false,
+        handler being "",
+        captures being (no-captures with nothing),
+        path-matched being path-matched,
+        allowed being allowed
+end paragraph
+
+
+methods-agree receives wanted as request-method, offered as request-method returns boolean begin paragraph
+    when (method-name with verb being wanted) equals (method-name with verb being offered) then
+        give true
+    end when
+    !!! A HEAD is served by the GET route; render-response drops the body.
+    give (method-name with verb being wanted) equals "HEAD"
+        and (method-name with verb being offered) equals "GET"
+end paragraph
+
+
+!!! --- Build the Allow field, adding HEAD alongside GET because the route
+!!! that serves one serves the other.
+
+add-to-allowed receives allowed as text, verb as request-method returns text begin paragraph
+    value name is method-name with verb being verb
+    value full is when name equals "GET" give "GET, HEAD" otherwise give name end when
+    when allowed equals "" then
+        give full
+    end when
+    when nil.std.text::contains with s being allowed, needle being full then
+        give allowed
+    end when
+    give allowed plus ", " plus full
+end paragraph
+
+
+no-captures returns array of query-parameter begin paragraph
+    variable empty as array of query-parameter is []
+    give empty
+end paragraph
+
+
+!!! --- The outcome of matching one pattern.
+
+public pattern-result begin record
+    field matched as boolean
+    field captures as array of query-parameter
+end record
+
+
+!!! --- Match one pattern against one path.
+!!!
+!!! Segment by segment. `:name` takes exactly one segment; `*name` takes the
+!!! rest of the path including its separators and must come last. An empty
+!!! capture is a failure, so `/users/:id` does not match `/users/` and hand a
+!!! handler an empty id to fall over on later.
+
+public match-pattern receives pattern as text, path as text returns pattern-result begin paragraph
+    value pattern-parts is split-on with input being (trimmed-path with path being pattern), separator being "/"
+    value path-parts is split-on with input being (trimmed-path with path being path), separator being "/"
+    variable captures is no-captures with nothing
+
+    variable index as number is 0
+    repeat while index is less than the length of pattern-parts
+        value piece is pattern-parts at index
+        value kind is piece-kind with piece being piece
+
+        when kind equals "rest" then
+            value taken is join-from with parts being path-parts, start being index
+            when taken equals "" then
+                give build pattern-result with matched being false, captures being (no-captures with nothing)
+            end when
+            append build query-parameter with
+                name being (nil.std.text::substring with s being piece, start being 1,
+                    length being (nil.std.text::length with s being piece) minus 1),
+                content being taken
+                to captures
+            give build pattern-result with matched being true, captures being captures
+        end when
+
+        when index is at least the length of path-parts then
+            give build pattern-result with matched being false, captures being (no-captures with nothing)
+        end when
+        value against is path-parts at index
+
+        !!! Flat rather than nested: a `when` whose branches each hold their
+        !!! own `when` needs an explicit arm block to stay unambiguous, and
+        !!! three plain conditions read better than one with two tails.
+        value capture-failed is kind equals "capture" and against equals ""
+        value literal-failed is kind equals "literal" and not (piece equals against)
+        when capture-failed or literal-failed then
+            give build pattern-result with matched being false, captures being (no-captures with nothing)
+        end when
+        when kind equals "capture" then
+            append build query-parameter with
+                name being (nil.std.text::substring with s being piece, start being 1,
+                    length being (nil.std.text::length with s being piece) minus 1),
+                content being against
+                to captures
+        end when
+        set index to index plus 1
+    end repeat
+
+    when the length of path-parts is greater than the length of pattern-parts then
+        give build pattern-result with matched being false, captures being (no-captures with nothing)
+    end when
+    give build pattern-result with matched being true, captures being captures
+end paragraph
+
+
+piece-kind receives piece as text returns text begin paragraph
+    when (nil.std.text::length with s being piece) is less than 2 then
+        give "literal"
+    end when
+    value first is nil.std.text::substring with s being piece, start being 0, length being 1
+    when first equals ":" then give "capture" end when
+    when first equals "*" then give "rest" end when
+    give "literal"
+end paragraph
+
+
+!!! --- A path without its leading separator, so "/a/b" and "a/b" split alike
+!!! and a trailing separator does not add an empty segment.
+
+trimmed-path receives path as text returns text begin paragraph
+    variable out as text is path
+    when nil.std.text::starts_with with s being out, prefix being "/" then
+        set out to nil.std.text::substring with s being out, start being 1,
+            length being (nil.std.text::length with s being out) minus 1
+    end when
+    value width is nil.std.text::length with s being out
+    when width is greater than 0 and (nil.std.text::ends_with with s being out, suffix being "/") then
+        set out to nil.std.text::substring with s being out, start being 0, length being width minus 1
+    end when
+    give out
+end paragraph
+
+
+join-from receives parts as array of text, start as number returns text begin paragraph
+    variable out as text is ""
+    variable index as number is start
+    repeat while index is less than the length of parts
+        when not (out equals "") then
+            set out to out plus "/"
+        end when
+        set out to out plus (parts at index)
+        set index to index plus 1
+    end repeat
+    give out
+end paragraph
+
+
+!!! --- A capture by name, which is how a handler reads `:id`.
+
+public capture-of receives result as route-result, name as text returns text begin paragraph
+    give parameter-value with parameters being result.captures, name being name
+end paragraph

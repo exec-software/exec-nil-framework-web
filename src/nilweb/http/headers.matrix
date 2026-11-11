@@ -1,0 +1,168 @@
+!!! HTTP header fields.
+!!!
+!!! An array of pairs, not a map. Three reasons, and the first is decisive:
+!!! an Ny generic map cannot be indexed or measured from a Matrix page, so a
+!!! map here would push every header read into Ny. The second is that header
+!!! order is observable — Set-Cookie must keep its order and its repeats, and
+!!! a map either loses them or grows a second shape to carry them. The third
+!!! is that a request carries a dozen fields, and a linear scan over a dozen
+!!! pairs is not the thing to optimise.
+!!!
+!!! Field names are compared case-insensitively, as RFC 9110 requires, and
+!!! kept in the spelling the sender used.
+
+book nilweb.http.headers
+
+read nil.std.core
+read nil.std.text
+read everything from nilweb.text.scan
+
+
+public header-field begin record
+    field name as text
+    field content as text
+end record
+
+
+!!! --- An empty header set.
+
+public no-headers returns array of header-field begin paragraph
+    variable empty as array of header-field is []
+    give empty
+end paragraph
+
+
+!!! --- The first value for a name, or "" when the name is absent.
+!!!
+!!! "" is also a legal field value, so a caller that must tell "absent" from
+!!! "present and empty" asks has-field — the same distinction a map would
+!!! force on every lookup, here only where it matters.
+
+public field-value receives fields as array of header-field, name as text returns text begin paragraph
+    repeat for each field-held in fields
+        when same-folded with left being field-held.name, right being name then
+            give field-held.content
+        end when
+    end repeat
+    give ""
+end paragraph
+
+
+public has-field receives fields as array of header-field, name as text returns boolean begin paragraph
+    repeat for each field-held in fields
+        when same-folded with left being field-held.name, right being name then
+            give true
+        end when
+    end repeat
+    give false
+end paragraph
+
+
+!!! --- Every value for a name, in the order they arrived.
+!!! Set-Cookie is the field that needs this; so does a repeated Via or Warning.
+
+public field-values receives fields as array of header-field, name as text returns array of text begin paragraph
+    variable found as array of text is []
+    repeat for each field-held in fields
+        when same-folded with left being field-held.name, right being name then
+            append field-held.content to found
+        end when
+    end repeat
+    give found
+end paragraph
+
+
+!!! --- Add a field, keeping any field of the same name that is already there.
+!!! This is the one to use for Set-Cookie.
+
+public add-field receives fields as array of header-field, name as text, content as text
+    returns array of header-field begin paragraph
+    variable out as array of header-field is []
+    repeat for each field-held in fields
+        append field-held to out
+    end repeat
+    append build header-field with name being name, content being content to out
+    give out
+end paragraph
+
+
+!!! --- Add a field, replacing every existing field of that name.
+!!! This is the one to use for Content-Type, Content-Length and the rest.
+
+public set-field receives fields as array of header-field, name as text, content as text
+    returns array of header-field begin paragraph
+    variable out as array of header-field is []
+    repeat for each field-held in fields
+        when not (same-folded with left being field-held.name, right being name) then
+            append field-held to out
+        end when
+    end repeat
+    append build header-field with name being name, content being content to out
+    give out
+end paragraph
+
+
+!!! --- Drop every field of a name. Removing an absent name is not an error.
+
+public remove-field receives fields as array of header-field, name as text
+    returns array of header-field begin paragraph
+    variable out as array of header-field is []
+    repeat for each field-held in fields
+        when not (same-folded with left being field-held.name, right being name) then
+            append field-held to out
+        end when
+    end repeat
+    give out
+end paragraph
+
+
+!!! --- Parse one header line: "Name: value", with the value trimmed.
+!!!
+!!! A line with no colon is not a header, and gives back a field with an empty
+!!! name — the caller checks for that and answers 400 rather than inventing a
+!!! field called the whole line.
+
+public parse-field receives line as text returns header-field begin paragraph
+    value cut is nil.std.text::index_of with s being line, needle being ":"
+    when cut is less than 1 then
+        give build header-field with name being "", content being ""
+    end when
+    value raw-name is nil.std.text::substring with s being line, start being 0, length being cut
+    value after is cut plus 1
+    value remaining is (nil.std.text::length with s being line) minus after
+    value raw-value is nil.std.text::substring with s being line, start being after, length being remaining
+    give build header-field with
+        name being (nil.std.text::trim with s being raw-name),
+        content being (nil.std.text::trim with s being raw-value)
+end paragraph
+
+
+!!! --- The fields as they go on the wire, each line ending CRLF.
+!!! The blank line that ends the header section is the caller's to write,
+!!! because only the caller knows whether a body follows.
+
+public render-fields receives fields as array of header-field returns text begin paragraph
+    variable out as text is ""
+    repeat for each field-held in fields
+        set out to out plus field-held.name plus ": " plus field-held.content plus (crlf with nothing)
+    end repeat
+    give out
+end paragraph
+
+
+!!! --- The line ending every HTTP message uses.
+!!!
+!!! Matrix predefines `newline`, `quote` and `tab`, and no carriage return —
+!!! there are no escapes in a text literal, so CR cannot be written as one. It
+!!! comes from the character converter instead. A bare LF between header lines
+!!! is a response some proxies and caches reject outright, so this is not a
+!!! detail to leave to the caller.
+
+public carriage-return returns text begin paragraph
+    give nil.std.core::Convert.i32_to_char with code being 13
+end paragraph
+
+
+public crlf returns text begin paragraph
+    give (carriage-return with nothing) plus newline
+end paragraph

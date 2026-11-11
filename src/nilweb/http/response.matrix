@@ -1,0 +1,222 @@
+!!! The outbound response.
+!!!
+!!! A record a handler returns, rendered to the wire once by the transport.
+!!! Nothing here writes to a socket, which is what makes a handler testable:
+!!! a test calls the handler and reads the record, with no server running.
+!!!
+!!! Content-Length is set at render time from the body's actual byte length,
+!!! not by the handler. A handler that sets it by hand gets it wrong the first
+!!! time the body changes, and a wrong Content-Length is the one framing error
+!!! a client cannot recover from.
+
+book nilweb.http.response
+
+read nil.std.core
+read nil.std.text
+read everything from nilweb.http.status
+read everything from nilweb.http.headers
+read everything from nilweb.http.method
+
+
+public http-response begin record
+    field code as number
+    field fields as array of header-field
+    field body as text
+end record
+
+
+!!! --- The general constructor. The ones below are the shapes worth naming.
+
+public make-response receives code as number, kind as text, body as text returns http-response begin paragraph
+    variable fields is no-headers with nothing
+    when not (kind equals "") then
+        set fields to set-field with fields being fields, name being "Content-Type", content being kind
+    end when
+    give build http-response with
+        code being code,
+        fields being fields,
+        body being body
+end paragraph
+
+
+public html-response receives body as text returns http-response begin paragraph
+    give make-response with code being status-ok, kind being "text/html; charset=utf-8", body being body
+end paragraph
+
+
+public text-response receives body as text returns http-response begin paragraph
+    give make-response with code being status-ok, kind being "text/plain; charset=utf-8", body being body
+end paragraph
+
+
+public json-response receives body as text returns http-response begin paragraph
+    give make-response with code being status-ok, kind being "application/json", body being body
+end paragraph
+
+
+!!! --- A response with no body at all, for 204 and for a HEAD.
+
+public empty-response receives code as number returns http-response begin paragraph
+    give build http-response with
+        code being code,
+        fields being (no-headers with nothing),
+        body being ""
+end paragraph
+
+
+!!! --- A redirect. 303 by default, because it is the one that turns a POST
+!!! into a GET and is therefore the one a form submission wants.
+
+public redirect-response receives location as text returns http-response begin paragraph
+    give redirect-with-code with location being location, code being status-see-other
+end paragraph
+
+
+public redirect-with-code receives location as text, code as number returns http-response begin paragraph
+    variable fields is no-headers with nothing
+    set fields to set-field with fields being fields, name being "Location", content being location
+    give build http-response with
+        code being code,
+        fields being fields,
+        body being ""
+end paragraph
+
+
+!!! --- The error shapes, as plain text. An application that wants a rendered
+!!! error page builds one with html-response and the status it chose.
+
+public error-response receives code as number, explanation as text returns http-response begin paragraph
+    value body is (status-digits with code being code) plus " " plus (reason-phrase with code being code)
+        plus newline plus explanation plus newline
+    give make-response with code being code, kind being "text/plain; charset=utf-8", body being body
+end paragraph
+
+
+public not-found-response receives path as text returns http-response begin paragraph
+    give error-response with code being status-not-found, explanation being "No route matched " plus path
+end paragraph
+
+
+public method-not-allowed-response receives allowed as text returns http-response begin paragraph
+    value answer is error-response with code being status-method-not-allowed,
+        explanation being "This route accepts " plus allowed
+    give with-header with response being answer, name being "Allow", content being allowed
+end paragraph
+
+
+!!! --- Changing a response, which is how middleware works here: it takes one
+!!! and gives back another, rather than mutating a shared object.
+
+public with-header receives response as http-response, name as text, content as text returns http-response begin paragraph
+    give build http-response with
+        code being response.code,
+        fields being (set-field with fields being response.fields, name being name, content being content),
+        body being response.body
+end paragraph
+
+
+public with-added-header receives response as http-response, name as text, content as text returns http-response begin paragraph
+    give build http-response with
+        code being response.code,
+        fields being (add-field with fields being response.fields, name being name, content being content),
+        body being response.body
+end paragraph
+
+
+public with-status receives response as http-response, code as number returns http-response begin paragraph
+    give build http-response with
+        code being code,
+        fields being response.fields,
+        body being response.body
+end paragraph
+
+
+public with-body receives response as http-response, body as text returns http-response begin paragraph
+    give build http-response with
+        code being response.code,
+        fields being response.fields,
+        body being body
+end paragraph
+
+
+!!! --- Set a cookie. The attributes are the caller's to spell, so this does
+!!! not decide HttpOnly or SameSite for them — but see the session module,
+!!! which does decide, because there the answer is not a matter of taste.
+
+public with-cookie receives response as http-response, name as text, content as text, attributes as text
+    returns http-response begin paragraph
+    variable crumb as text is name plus "=" plus content
+    when not (attributes equals "") then
+        set crumb to crumb plus "; " plus attributes
+    end when
+    give with-added-header with response being response, name being "Set-Cookie", content being crumb
+end paragraph
+
+
+!!! --- Render the whole message.
+!!!
+!!! `for-method` so a HEAD gets the headers of its GET and none of the body —
+!!! including a Content-Length that still describes the body it is not being
+!!! sent, which is what RFC 9110 asks for and what a client uses to decide
+!!! whether to make the GET at all.
+
+public render-response receives response as http-response, verb as request-method returns text begin paragraph
+    value suppressed is (body-is-suppressed with verb being verb)
+        or (status-forbids-body with code being response.code)
+    value body is when suppressed give "" otherwise give response.body end when
+
+    variable fields is response.fields
+    when not (status-forbids-body with code being response.code) then
+        set fields to set-field with fields being fields, name being "Content-Length",
+            content being (count-text with amount being (nil.std.text::length with s being response.body))
+    end when
+
+    give "HTTP/1.1 " plus (status-digits with code being response.code) plus " "
+        plus (reason-phrase with code being response.code) plus (crlf with nothing)
+        plus (render-fields with fields being fields)
+        plus (crlf with nothing)
+        plus body
+end paragraph
+
+
+!!! --- Render for a GET, which is what almost every caller wants.
+
+public render-for-get receives response as http-response returns text begin paragraph
+    give render-response with response being response, verb being request-method.Get
+end paragraph
+
+
+!!! --- A whole number as text. Content-Length is never negative, but a length
+!!! that came back negative would be a bug worth seeing rather than hiding.
+
+public count-text receives amount as number returns text begin paragraph
+    when amount equals 0 then give "0" end when
+    variable rest as number is amount
+    variable sign as text is ""
+    when amount is less than 0 then
+        set sign to "-"
+        set rest to 0 minus amount
+    end when
+    variable out as text is ""
+    repeat while rest is greater than 0
+        set out to (single-digit with digit being (rest remainder 10)) plus out
+        set rest to rest over 10
+    end repeat
+    give sign plus out
+end paragraph
+
+
+single-digit receives digit as number returns text begin paragraph
+    give switch digit
+        case 0 then stop switching with "0"
+        case 1 then stop switching with "1"
+        case 2 then stop switching with "2"
+        case 3 then stop switching with "3"
+        case 4 then stop switching with "4"
+        case 5 then stop switching with "5"
+        case 6 then stop switching with "6"
+        case 7 then stop switching with "7"
+        case 8 then stop switching with "8"
+        otherwise stop switching with "9"
+    end switch
+end paragraph

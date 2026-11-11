@@ -1,0 +1,272 @@
+!!! The inbound request.
+!!!
+!!! Parsing happens once, at construction, and never again: a handler reading
+!!! a query parameter is reading an array that was built when the request
+!!! arrived. The alternative — re-splitting the query string on every lookup —
+!!! is what the Ny original did, and it meant a page that read five parameters
+!!! parsed the query five times.
+!!!
+!!! A malformed request does not fault. It comes back with `well-formed` false
+!!! and a reason, because the thing on the other end of a socket is not under
+!!! this program's control and "the client sent rubbish" is a 400, not a crash.
+
+book nilweb.http.request
+
+read nil.std.core
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.http.method
+read everything from nilweb.http.headers
+read everything from nilweb.http.uri
+
+
+public http-request begin record
+    field verb as request-method
+    !!! The request target exactly as it arrived, query and escapes intact.
+    field target as text
+    !!! The target's path, percent-decoded. What a route matches against.
+    field path as text
+    !!! The target's query, still encoded. Parsed into `parameters` already.
+    field query-text as text
+    field version as text
+    field fields as array of header-field
+    field parameters as array of query-parameter
+    field body as text
+    field well-formed as boolean
+    !!! Why it is not well formed, for the 400 that follows. "" when it is.
+    field complaint as text
+end record
+
+
+!!! --- A request that could not be parsed, carrying the reason.
+
+public malformed-request receives complaint as text returns http-request begin paragraph
+    give build http-request with
+        verb being request-method.Get,
+        target being "",
+        path being "",
+        query-text being "",
+        version being "HTTP/1.1",
+        fields being (no-headers with nothing),
+        parameters being (empty-parameters with nothing),
+        body being "",
+        well-formed being false,
+        complaint being complaint
+end paragraph
+
+
+empty-parameters returns array of query-parameter begin paragraph
+    variable none-yet as array of query-parameter is []
+    give none-yet
+end paragraph
+
+
+!!! --- Build a request directly, for a test or a handler that synthesises one.
+
+public make-request receives verb as request-method, target as text, fields as array of header-field,
+    body as text returns http-request begin paragraph
+    give build http-request with
+        verb being verb,
+        target being target,
+        path being (target-path with target being target),
+        query-text being (target-query with target being target),
+        version being "HTTP/1.1",
+        fields being fields,
+        parameters being (parse-parameters with raw being (target-query with target being target)),
+        body being body,
+        well-formed being true,
+        complaint being ""
+end paragraph
+
+
+!!! --- Parse a whole request message.
+!!!
+!!! The message is split on the blank line that ends the header section, then
+!!! the first line is the request line and the rest are fields. The body is
+!!! taken as whatever followed, without consulting Content-Length: a transport
+!!! that framed the message wrongly is the transport's bug, and truncating
+!!! here would hide it.
+
+public parse-request receives raw as text returns http-request begin paragraph
+    when raw equals "" then
+        give malformed-request with complaint being "the request was empty"
+    end when
+
+    value head-and-body is split-head-from-body with raw being raw
+    value head is head-and-body at 0
+    value body is head-and-body at 1
+    value lines is split-lines-of with raw being head
+    when the length of lines is less than 1 then
+        give malformed-request with complaint being "the request had no request line"
+    end when
+
+    value request-line is lines at 0
+    value words is split-on with input being request-line, separator being " "
+    when the length of words is less than 3 then
+        give malformed-request with complaint being "the request line was not METHOD TARGET VERSION"
+    end when
+
+    value verb-word is words at 0
+    when not (is-known-method with word being verb-word) then
+        give malformed-request with complaint being "unknown method " plus quote plus verb-word plus quote
+    end when
+
+    value target is words at 1
+    when target equals "" then
+        give malformed-request with complaint being "the request line had no target"
+    end when
+
+    variable fields is no-headers with nothing
+    variable index as number is 1
+    repeat while index is less than the length of lines
+        value line is lines at index
+        when not (line equals "") then
+            value parsed is parse-field with line being line
+            when parsed.name equals "" then
+                give malformed-request with complaint being "a header line had no name: " plus line
+            end when
+            set fields to add-field with fields being fields, name being parsed.name, content being parsed.content
+        end when
+        set index to index plus 1
+    end repeat
+
+    give build http-request with
+        verb being (parse-method with word being verb-word),
+        target being target,
+        path being (target-path with target being target),
+        query-text being (target-query with target being target),
+        version being words at 2,
+        fields being fields,
+        parameters being (parse-parameters with raw being (target-query with target being target)),
+        body being body,
+        well-formed being true,
+        complaint being ""
+end paragraph
+
+
+!!! --- Cut the message at the first blank line.
+!!! Tolerates a client that sent bare LF rather than CRLF, which curl does not
+!!! but hand-written test fixtures and some embedded clients do.
+
+split-head-from-body receives raw as text returns array of text begin paragraph
+    value marker is (crlf with nothing) plus (crlf with nothing)
+    value cut is nil.std.text::index_of with s being raw, needle being marker
+    when cut is at least 0 then
+        give two-parts with raw being raw, cut being cut, width being 4
+    end when
+    value loose is nil.std.text::index_of with s being raw, needle being newline plus newline
+    when loose is at least 0 then
+        give two-parts with raw being raw, cut being loose, width being 2
+    end when
+    variable only-head as array of text is []
+    append raw to only-head
+    append "" to only-head
+    give only-head
+end paragraph
+
+
+two-parts receives raw as text, cut as number, width as number returns array of text begin paragraph
+    variable split-at as array of text is []
+    append (nil.std.text::substring with s being raw, start being 0, length being cut) to split-at
+    value after is cut plus width
+    value remaining is (nil.std.text::length with s being raw) minus after
+    append (nil.std.text::substring with s being raw, start being after, length being remaining) to split-at
+    give split-at
+end paragraph
+
+
+!!! --- Header lines, with any trailing carriage return taken off.
+
+split-lines-of receives raw as text returns array of text begin paragraph
+    variable out as array of text is []
+    value rough is split-on with input being raw, separator being newline
+    repeat for each line in rough
+        append (without-trailing-return with line being line) to out
+    end repeat
+    give out
+end paragraph
+
+
+without-trailing-return receives line as text returns text begin paragraph
+    value width is nil.std.text::length with s being line
+    when width is less than 1 then
+        give line
+    end when
+    value last is nil.std.text::substring with s being line, start being width minus 1, length being 1
+    when last equals (carriage-return with nothing) then
+        give nil.std.text::substring with s being line, start being 0, length being width minus 1
+    end when
+    give line
+end paragraph
+
+
+!!! --- Reading a request.
+
+public header-of receives request as http-request, name as text returns text begin paragraph
+    give field-value with fields being request.fields, name being name
+end paragraph
+
+
+public query-of receives request as http-request, name as text returns text begin paragraph
+    give parameter-value with parameters being request.parameters, name being name
+end paragraph
+
+
+!!! --- A field of a urlencoded form body.
+!!!
+!!! Only for application/x-www-form-urlencoded. A multipart body has a
+!!! different grammar and is not decoded here; `content-kind` tells them apart
+!!! so a handler can refuse rather than silently read nothing.
+
+public form-of receives request as http-request, name as text returns text begin paragraph
+    when not (is-form-encoded with request being request) then
+        give ""
+    end when
+    give parameter-value with parameters being (parse-parameters with raw being request.body), name being name
+end paragraph
+
+
+public is-form-encoded receives request as http-request returns boolean begin paragraph
+    give (content-kind with request being request) equals "application/x-www-form-urlencoded"
+end paragraph
+
+
+!!! --- The media type, without its parameters and folded to lower case.
+!!! "text/html; charset=utf-8" is "text/html", which is what a comparison wants.
+
+public content-kind receives request as http-request returns text begin paragraph
+    value whole is field-value with fields being request.fields, name being "Content-Type"
+    value bare is before-first with input being whole, separator being ";"
+    give nil.std.text::to_lower with s being (nil.std.text::trim with s being bare)
+end paragraph
+
+
+!!! --- One cookie's value, or "" when it is not in the Cookie field.
+
+public cookie-of receives request as http-request, name as text returns text begin paragraph
+    value jar is field-value with fields being request.fields, name being "Cookie"
+    when jar equals "" then
+        give ""
+    end when
+    value crumbs is split-on with input being jar, separator being ";"
+    repeat for each crumb in crumbs
+        value trimmed is nil.std.text::trim with s being crumb
+        value crumb-name is before-first with input being trimmed, separator being "="
+        when crumb-name equals name then
+            give decode-component with raw being (after-first with input being trimmed, separator being "=")
+        end when
+    end repeat
+    give ""
+end paragraph
+
+
+!!! --- The Host field, which HTTP/1.1 requires and some clients still omit.
+
+public host-of receives request as http-request returns text begin paragraph
+    give field-value with fields being request.fields, name being "Host"
+end paragraph
+
+
+public body-length receives request as http-request returns number begin paragraph
+    give nil.std.text::length with s being request.body
+end paragraph

@@ -1,0 +1,351 @@
+!!! Request targets: percent-decoding, query strings and form bodies.
+!!!
+!!! One module, because a query string and an urlencoded form body are the
+!!! same grammar arriving by two routes, and a framework that decoded them
+!!! differently would be a framework with two sets of bugs.
+!!!
+!!! Everything here works in bytes. nil.std.text measures and slices text by
+!!! byte — `length` of "café" is 5 — which is what a percent-escape needs,
+!!! since %C3%A9 is two escapes for one character and must decode to two bytes
+!!! that happen to land next to each other.
+
+book nilweb.http.uri
+
+read nil.std.core
+read nil.std.text
+read everything from nilweb.text.scan
+
+
+public query-parameter begin record
+    field name as text
+    field content as text
+end record
+
+
+!!! --- Decode one percent-encoded component.
+!!!
+!!! `%C3%A9` is two escapes that together are one character, so the escapes
+!!! cannot be turned into text one at a time. The converter this has to go
+!!! through — nil.std.core's i32_to_char — takes a Unicode scalar, not a byte:
+!!! asked for 195 it gives back the two bytes that encode U+00C3, and decoding
+!!! escape by escape would turn "café" into "cafÃ©". So the escapes are
+!!! gathered as byte values and assembled into characters by bytes-as-text
+!!! below, which is where the UTF-8 is actually read.
+!!!
+!!! Literal stretches are copied as they stand. A byte that is part of a
+!!! multi-byte character is copied one byte at a time, which is correct
+!!! because joining text joins bytes: the character is reassembled by the
+!!! concatenation.
+!!!
+!!! `+` becomes a space, because this decodes both query strings and form
+!!! bodies and a form body spells space that way. A `%` that is not followed
+!!! by two hex digits is kept literally rather than dropped: the request is
+!!! malformed, and inventing a deletion loses the evidence of what arrived.
+
+public decode-component receives raw as text returns text begin paragraph
+    value width is nil.std.text::length with s being raw
+    variable out as text is ""
+    variable pending is empty-bytes with nothing
+    variable index as number is 0
+    repeat while index is less than width
+        value here is nil.std.text::substring with s being raw, start being index, length being 1
+        value escaped is here equals "%" and index plus 2 is less than width
+            and (is-hex-pair with pair being (nil.std.text::substring with s being raw, start being index plus 1, length being 2))
+        when escaped then
+            value pair is nil.std.text::substring with s being raw, start being index plus 1, length being 2
+            append (nil.std.core::Convert.from_hex with hex_str being pair) to pending
+            set index to index plus 3
+        otherwise
+            set out to out plus (bytes-as-text with bytes being pending)
+            set pending to empty-bytes with nothing
+            when here equals "+" then
+                set out to out plus " "
+            otherwise
+                set out to out plus here
+            end when
+            set index to index plus 1
+        end when
+    end repeat
+    give out plus (bytes-as-text with bytes being pending)
+end paragraph
+
+
+empty-bytes returns array of number begin paragraph
+    variable none-yet as array of number is []
+    give none-yet
+end paragraph
+
+
+!!! --- Assemble decoded bytes into text, reading the UTF-8 as it goes.
+!!!
+!!! An ill-formed sequence becomes U+FFFD and the scan moves on by one byte,
+!!! which is what the WHATWG encoding standard requires and what every browser
+!!! does. The alternative — passing the byte through — produces text that is
+!!! not valid UTF-8, and every later `length` or `substring` over it is then
+!!! working on something the rest of the stack believes is impossible.
+
+bytes-as-text receives bytes as array of number returns text begin paragraph
+    value count is the length of bytes
+    variable out as text is ""
+    variable index as number is 0
+    repeat while index is less than count
+        value lead is bytes at index
+        when lead is less than 128 then
+            set out to out plus (nil.std.core::Convert.i32_to_char with code being lead)
+            set index to index plus 1
+        otherwise when lead is at least 194 and lead is at most 223 then
+            value taken is take-sequence with bytes being bytes, index being index, follows being 1, mask being 31
+            set out to out plus taken.0
+            set index to index plus taken.1
+        otherwise when lead is at least 224 and lead is at most 239 then
+            value taken is take-sequence with bytes being bytes, index being index, follows being 2, mask being 15
+            set out to out plus taken.0
+            set index to index plus taken.1
+        otherwise when lead is at least 240 and lead is at most 244 then
+            value taken is take-sequence with bytes being bytes, index being index, follows being 3, mask being 7
+            set out to out plus taken.0
+            set index to index plus taken.1
+        otherwise
+            !!! 192, 193 and 245..255 can never lead a well-formed sequence.
+            set out to out plus (replacement-character with nothing)
+            set index to index plus 1
+        end when
+    end repeat
+    give out
+end paragraph
+
+
+!!! --- Read one multi-byte sequence: the character it spells, and how many
+!!! bytes to step over. An ill-formed one spells U+FFFD and steps over one,
+!!! so the byte after it gets its own chance to begin a sequence.
+
+take-sequence receives bytes as array of number, index as number, follows as number, mask as number
+    returns tuple of (text, number) begin paragraph
+    value count is the length of bytes
+    when index plus follows is at least count then
+        give ((replacement-character with nothing), 1)
+    end when
+
+    variable point as number is (bytes at index) bitwise and mask
+    variable step as number is 1
+    repeat while step is at most follows
+        value next is bytes at (index plus step)
+        when next is less than 128 or next is greater than 191 then
+            give ((replacement-character with nothing), 1)
+        end when
+        set point to (point shifted left by 6) bitwise or (next bitwise and 63)
+        set step to step plus 1
+    end repeat
+
+    !!! A surrogate half and anything past the last plane are not characters,
+    !!! and an overlong encoding spells a point below its own range.
+    value overlong is (follows equals 1 and point is less than 128)
+        or (follows equals 2 and point is less than 2048)
+        or (follows equals 3 and point is less than 65536)
+    value surrogate is point is at least 55296 and point is at most 57343
+    when overlong or surrogate or point is greater than 1114111 then
+        give ((replacement-character with nothing), 1)
+    end when
+
+    give ((nil.std.core::Convert.i32_to_char with code being point), follows plus 1)
+end paragraph
+
+
+replacement-character returns text begin paragraph
+    give nil.std.core::Convert.i32_to_char with code being 65533
+end paragraph
+
+
+is-hex-pair receives pair as text returns boolean begin paragraph
+    give (is-hex-digit with digit being (nil.std.text::substring with s being pair, start being 0, length being 1))
+        and (is-hex-digit with digit being (nil.std.text::substring with s being pair, start being 1, length being 1))
+end paragraph
+
+
+is-hex-digit receives digit as text returns boolean begin paragraph
+    value folded is nil.std.text::to_lower with s being digit
+    give folded equals "0" or folded equals "1" or folded equals "2" or folded equals "3"
+        or folded equals "4" or folded equals "5" or folded equals "6" or folded equals "7"
+        or folded equals "8" or folded equals "9" or folded equals "a" or folded equals "b"
+        or folded equals "c" or folded equals "d" or folded equals "e" or folded equals "f"
+end paragraph
+
+
+!!! --- Encode one component for a query string.
+!!!
+!!! The unreserved set of RFC 3986 passes through; every other ASCII byte is
+!!! escaped. Space becomes %20 and not `+`, because %20 is correct in both a
+!!! path and a query while `+` is correct in neither except a form body.
+!!!
+!!! KNOWN LIMIT — non-ASCII bytes are passed through unescaped.
+!!!
+!!! Escaping one would mean reading its numeric value, and nothing reachable
+!!! from Matrix can do that. nil.std.text slices by byte but has no byte-to-
+!!! number conversion, and nil.std.core's char_to_i32 takes a whole Unicode
+!!! scalar and *aborts the process* on a partial one — not a fault that can be
+!!! caught, a fatal runtime error. So a byte of a multi-byte character cannot
+!!! be inspected, and a multi-byte character cannot be isolated to inspect
+!!! whole, because isolating it needs the same byte test.
+!!!
+!!! Decoding has no such hole: it works in byte values throughout and is
+!!! correct for all of Unicode. This is the one direction that is short, and
+!!! it closes the day nil.std.text grows a `byte_at`. Until then, a caller
+!!! encoding text that may be non-ASCII should know that what comes back is a
+!!! valid URL only if the input was ASCII.
+
+public encode-component receives raw as text returns text begin paragraph
+    value width is nil.std.text::length with s being raw
+    variable out as text is ""
+    variable index as number is 0
+    repeat while index is less than width
+        value here is nil.std.text::substring with s being raw, start being index, length being 1
+        when is-unreserved with glyph being here then
+            set out to out plus here
+        otherwise
+            value code is ascii-code-of with glyph being here
+            when code is less than 0 then
+                !!! Not an ASCII byte: see the limit above.
+                set out to out plus here
+            otherwise
+                set out to out plus "%" plus (two-hex with code being code)
+            end when
+        end when
+        set index to index plus 1
+    end repeat
+    give out
+end paragraph
+
+
+!!! --- A byte's value, or minus one when it is not an ASCII byte.
+!!!
+!!! By comparison rather than conversion, because conversion is the thing that
+!!! aborts. Only runs for a byte already known not to be unreserved, so the
+!!! common path through encode-component never reaches it.
+
+ascii-code-of receives glyph as text returns number begin paragraph
+    variable code as number is 0
+    repeat while code is less than 128
+        when glyph equals (nil.std.core::Convert.i32_to_char with code being code) then
+            give code
+        end when
+        set code to code plus 1
+    end repeat
+    give 0 minus 1
+end paragraph
+
+
+is-unreserved receives glyph as text returns boolean begin paragraph
+    value folded is nil.std.text::to_lower with s being glyph
+    value is-glyph is folded is at least "a" and folded is at most "z"
+    value is-digit is glyph is at least "0" and glyph is at most "9"
+    give is-glyph or is-digit or glyph equals "-" or glyph equals "."
+        or glyph equals "_" or glyph equals "~"
+end paragraph
+
+
+two-hex receives code as number returns text begin paragraph
+    value high is (code over 16) remainder 16
+    value low is code remainder 16
+    give (hex-digit with amount being high) plus (hex-digit with amount being low)
+end paragraph
+
+
+hex-digit receives amount as number returns text begin paragraph
+    give switch amount
+        case 0 then stop switching with "0"
+        case 1 then stop switching with "1"
+        case 2 then stop switching with "2"
+        case 3 then stop switching with "3"
+        case 4 then stop switching with "4"
+        case 5 then stop switching with "5"
+        case 6 then stop switching with "6"
+        case 7 then stop switching with "7"
+        case 8 then stop switching with "8"
+        case 9 then stop switching with "9"
+        case 10 then stop switching with "A"
+        case 11 then stop switching with "B"
+        case 12 then stop switching with "C"
+        case 13 then stop switching with "D"
+        case 14 then stop switching with "E"
+        otherwise stop switching with "F"
+    end switch
+end paragraph
+
+
+!!! --- Split a query string or form body into decoded pairs.
+!!!
+!!! A bare key with no `=` is a parameter with an empty value, which is what
+!!! every server does and what `?debug` means in practice. An empty segment,
+!!! as in `a=1&&b=2`, is skipped rather than becoming a nameless parameter.
+
+public parse-parameters receives raw as text returns array of query-parameter begin paragraph
+    variable found as array of query-parameter is []
+    when raw equals "" then
+        give found
+    end when
+    value segments is split-on with input being raw, separator being "&"
+    repeat for each segment in segments
+        when not (segment equals "") then
+            value raw-name is before-first with input being segment, separator being "="
+            value raw-content is after-first with input being segment, separator being "="
+            append build query-parameter with
+                name being (decode-component with raw being raw-name),
+                content being (decode-component with raw being raw-content)
+                to found
+        end when
+    end repeat
+    give found
+end paragraph
+
+
+!!! --- The first value for a name, or "" when it is absent.
+!!! Query parameter names are case-sensitive, unlike header field names.
+
+public parameter-value receives parameters as array of query-parameter, name as text returns text begin paragraph
+    repeat for each parameter in parameters
+        when parameter.name equals name then
+            give parameter.content
+        end when
+    end repeat
+    give ""
+end paragraph
+
+
+public has-parameter receives parameters as array of query-parameter, name as text returns boolean begin paragraph
+    repeat for each parameter in parameters
+        when parameter.name equals name then
+            give true
+        end when
+    end repeat
+    give false
+end paragraph
+
+
+!!! --- Every value for a repeated name, as `?tag=a&tag=b` sends.
+
+public parameter-values receives parameters as array of query-parameter, name as text returns array of text begin paragraph
+    variable found as array of text is []
+    repeat for each parameter in parameters
+        when parameter.name equals name then
+            append parameter.content to found
+        end when
+    end repeat
+    give found
+end paragraph
+
+
+!!! --- The path part of a request target, with the query removed and the
+!!! percent-escapes decoded.
+
+public target-path receives target as text returns text begin paragraph
+    give decode-component with raw being (before-first with input being target, separator being "?")
+end paragraph
+
+
+!!! --- The query part of a request target, still encoded.
+!!! Left encoded because `&` and `=` inside a value must survive until the
+!!! split, and decoding first would lose them.
+
+public target-query receives target as text returns text begin paragraph
+    give after-first with input being target, separator being "?"
+end paragraph

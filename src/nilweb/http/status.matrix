@@ -1,0 +1,154 @@
+!!! HTTP status codes.
+!!!
+!!! A number, not a choice. A choice would be a closed set, and the status
+!!! space is not closed: an application is entitled to answer 418, or 207, or
+!!! a code registered after this file was written, and a framework that cannot
+!!! carry one is a framework its users have to work around. The named
+!!! constants below are a convenience over the number, never a restriction on it.
+
+book nilweb.http.status
+
+read nil.std.text
+
+public constant status-ok as number is 200
+public constant status-created as number is 201
+public constant status-accepted as number is 202
+public constant status-no-content as number is 204
+public constant status-moved-permanently as number is 301
+public constant status-found as number is 302
+public constant status-see-other as number is 303
+public constant status-not-modified as number is 304
+public constant status-temporary-redirect as number is 307
+public constant status-permanent-redirect as number is 308
+public constant status-bad-request as number is 400
+public constant status-unauthorized as number is 401
+public constant status-forbidden as number is 403
+public constant status-not-found as number is 404
+public constant status-method-not-allowed as number is 405
+public constant status-not-acceptable as number is 406
+public constant status-request-timeout as number is 408
+public constant status-conflict as number is 409
+public constant status-payload-too-large as number is 413
+public constant status-uri-too-long as number is 414
+public constant status-unsupported-media-type as number is 415
+public constant status-unprocessable as number is 422
+public constant status-too-many-requests as number is 429
+public constant status-internal-error as number is 500
+public constant status-not-implemented as number is 501
+public constant status-bad-gateway as number is 502
+public constant status-service-unavailable as number is 503
+public constant status-gateway-timeout as number is 504
+public constant status-version-not-supported as number is 505
+
+
+!!! --- The reason phrase for the status line.
+!!!
+!!! A code with no registered phrase gets the class default rather than an
+!!! empty one, because a status line must have a reason token and an unknown
+!!! 4xx is still plainly a client error.
+
+public reason-phrase receives code as number returns text begin paragraph
+    give switch code
+        case 200 then stop switching with "OK"
+        case 201 then stop switching with "Created"
+        case 202 then stop switching with "Accepted"
+        case 204 then stop switching with "No Content"
+        case 301 then stop switching with "Moved Permanently"
+        case 302 then stop switching with "Found"
+        case 303 then stop switching with "See Other"
+        case 304 then stop switching with "Not Modified"
+        case 307 then stop switching with "Temporary Redirect"
+        case 308 then stop switching with "Permanent Redirect"
+        case 400 then stop switching with "Bad Request"
+        case 401 then stop switching with "Unauthorized"
+        case 403 then stop switching with "Forbidden"
+        case 404 then stop switching with "Not Found"
+        case 405 then stop switching with "Method Not Allowed"
+        case 406 then stop switching with "Not Acceptable"
+        case 408 then stop switching with "Request Timeout"
+        case 409 then stop switching with "Conflict"
+        case 413 then stop switching with "Payload Too Large"
+        case 414 then stop switching with "URI Too Long"
+        case 415 then stop switching with "Unsupported Media Type"
+        case 422 then stop switching with "Unprocessable Content"
+        case 429 then stop switching with "Too Many Requests"
+        case 500 then stop switching with "Internal Server Error"
+        case 501 then stop switching with "Not Implemented"
+        case 502 then stop switching with "Bad Gateway"
+        case 503 then stop switching with "Service Unavailable"
+        case 504 then stop switching with "Gateway Timeout"
+        case 505 then stop switching with "HTTP Version Not Supported"
+        otherwise stop switching with (class-phrase with code being code)
+    end switch
+end paragraph
+
+
+class-phrase receives code as number returns text begin paragraph
+    when code is at least 100 and code is at most 199 then give "Information" end when
+    when code is at least 200 and code is at most 299 then give "Success" end when
+    when code is at least 300 and code is at most 399 then give "Redirection" end when
+    when code is at least 400 and code is at most 499 then give "Client Error" end when
+    when code is at least 500 and code is at most 599 then give "Server Error" end when
+    give "Unknown"
+end paragraph
+
+
+!!! --- A response with this status carries no body, whatever the handler set.
+!!! RFC 9110: 1xx, 204 and 304 have no content, and a message that sends one
+!!! anyway is unparseable by the client.
+
+public status-forbids-body receives code as number returns boolean begin paragraph
+    give (code is at least 100 and code is at most 199) or code equals 204 or code equals 304
+end paragraph
+
+
+!!! --- Whether the code is one a handler should be allowed to send at all.
+!!! Outside 100..599 is a programming error, caught here rather than on the wire.
+
+public is-valid-status receives code as number returns boolean begin paragraph
+    give code is at least 100 and code is at most 599
+end paragraph
+
+
+public is-redirect receives code as number returns boolean begin paragraph
+    give code equals 301 or code equals 302 or code equals 303
+        or code equals 307 or code equals 308
+end paragraph
+
+
+public is-error receives code as number returns boolean begin paragraph
+    give code is at least 400
+end paragraph
+
+
+!!! --- A status code as its three digits.
+!!! Written here rather than borrowed, so the status line never depends on a
+!!! general number formatter being correct about negatives or widths.
+
+public status-digits receives code as number returns text begin paragraph
+    when not (is-valid-status with code being code) then
+        give "500"
+    end when
+    value hundreds is code over 100
+    value tens is (code remainder 100) over 10
+    value ones is code remainder 10
+    give (digit-text with digit being hundreds)
+        plus (digit-text with digit being tens)
+        plus (digit-text with digit being ones)
+end paragraph
+
+
+digit-text receives digit as number returns text begin paragraph
+    give switch digit
+        case 0 then stop switching with "0"
+        case 1 then stop switching with "1"
+        case 2 then stop switching with "2"
+        case 3 then stop switching with "3"
+        case 4 then stop switching with "4"
+        case 5 then stop switching with "5"
+        case 6 then stop switching with "6"
+        case 7 then stop switching with "7"
+        case 8 then stop switching with "8"
+        otherwise stop switching with "9"
+    end switch
+end paragraph

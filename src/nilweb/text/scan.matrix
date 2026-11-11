@@ -1,0 +1,83 @@
+!!! Text scanning, in Matrix.
+!!!
+!!! nil.std.text has the primitives this needs — index_of, substring, trim,
+!!! to_lower — and they work from Matrix. What it does not have in a form
+!!! Matrix can use is anything returning a collection: `split` gives back a
+!!! `vec<text>`, and a Matrix page cannot index or measure an Ny generic. So
+!!! the splitting lives here, over `array of text`, which Matrix owns.
+!!!
+!!! Every paragraph here is total: an index past the end gives "" rather than
+!!! faulting, because this code reads whatever arrives on a socket and a
+!!! malformed request is an ordinary Tuesday, not an exception.
+
+book nilweb.text.scan
+
+read nil.std.text
+
+
+!!! --- Split on a one-or-more character separator.
+!!! An empty separator gives back the whole input as one part.
+
+public split-on receives input as text, separator as text returns array of text begin paragraph
+    variable parts as array of text is []
+    value width is nil.std.text::length with s being separator
+    when width is less than 1 then
+        append input to parts
+        give parts
+    end when
+
+    variable rest as text is input
+    repeat forever
+        value cut is nil.std.text::index_of with s being rest, needle being separator
+        when cut is less than 0 then
+            append rest to parts
+            stop repeating
+        end when
+        append (nil.std.text::substring with s being rest, start being 0, length being cut) to parts
+        value after is cut plus width
+        value remaining is (nil.std.text::length with s being rest) minus after
+        set rest to nil.std.text::substring with s being rest, start being after, length being remaining
+    end repeat
+    give parts
+end paragraph
+
+
+!!! --- Everything before the first separator, or all of it if there is none.
+
+public before-first receives input as text, separator as text returns text begin paragraph
+    value cut is nil.std.text::index_of with s being input, needle being separator
+    when cut is less than 0 then
+        give input
+    end when
+    give nil.std.text::substring with s being input, start being 0, length being cut
+end paragraph
+
+
+!!! --- Everything after the first separator, or "" if there is none.
+
+public after-first receives input as text, separator as text returns text begin paragraph
+    value cut is nil.std.text::index_of with s being input, needle being separator
+    when cut is less than 0 then
+        give ""
+    end when
+    value after is cut plus (nil.std.text::length with s being separator)
+    value remaining is (nil.std.text::length with s being input) minus after
+    give nil.std.text::substring with s being input, start being after, length being remaining
+end paragraph
+
+
+!!! --- ASCII case-insensitive equality.
+!!!
+!!! HTTP field names are case-insensitive, and that is the only folding this
+!!! framework does: paths, query keys and cookie names are all compared exactly.
+
+public same-folded receives left as text, right as text returns boolean begin paragraph
+    give (nil.std.text::to_lower with s being left) equals (nil.std.text::to_lower with s being right)
+end paragraph
+
+
+!!! --- Whether the text has anything in it once space is taken off both ends.
+
+public is-blank receives input as text returns boolean begin paragraph
+    give (nil.std.text::trim with s being input) equals ""
+end paragraph

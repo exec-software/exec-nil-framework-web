@@ -1,0 +1,78 @@
+!!! The HTTP request method.
+!!!
+!!! A choice rather than text, so a route table cannot be written against a
+!!! method that does not exist and a comparison cannot quietly fail on case.
+!!! Parsing text into one is the only place a spelling is judged, and it
+!!! happens once, at the edge, where the request line is read.
+
+book nilweb.http.method
+
+public request-method begin choice
+    when Get
+    when Post
+    when Put
+    when Delete
+    when Patch
+    when Head
+    when Options
+end choice
+
+
+!!! --- The wire spelling, which is always upper case.
+
+public method-name receives verb as request-method returns text begin paragraph
+    give consider verb
+        when request-method.Get give "GET"
+        when request-method.Post give "POST"
+        when request-method.Put give "PUT"
+        when request-method.Delete give "DELETE"
+        when request-method.Patch give "PATCH"
+        when request-method.Head give "HEAD"
+        when request-method.Options give "OPTIONS"
+        otherwise give "GET"
+    end consider
+end paragraph
+
+
+!!! --- Read a method from a request line.
+!!!
+!!! The wire form is case-sensitive by RFC 9110, so this is an exact match and
+!!! not a folded one: "get" is a malformed request, not a GET.
+
+public parse-method receives word as text returns request-method begin paragraph
+    give consider-method with word being word
+end paragraph
+
+
+!!! --- Whether a method was recognised at all.
+!!! Separate from the parse so a caller can answer 501 rather than guess.
+
+public is-known-method receives word as text returns boolean begin paragraph
+    give word equals "GET" or word equals "POST" or word equals "PUT"
+        or word equals "DELETE" or word equals "PATCH" or word equals "HEAD"
+        or word equals "OPTIONS"
+end paragraph
+
+
+!!! --- An unknown word reads as Get so every path has a total answer; callers
+!!! that care ask is-known-method first.
+
+consider-method receives word as text returns request-method begin paragraph
+    when word equals "POST" then give request-method.Post end when
+    when word equals "PUT" then give request-method.Put end when
+    when word equals "DELETE" then give request-method.Delete end when
+    when word equals "PATCH" then give request-method.Patch end when
+    when word equals "HEAD" then give request-method.Head end when
+    when word equals "OPTIONS" then give request-method.Options end when
+    give request-method.Get
+end paragraph
+
+
+!!! --- A HEAD response carries the headers of a GET and none of its body.
+
+public body-is-suppressed receives verb as request-method returns boolean begin paragraph
+    give consider verb
+        when request-method.Head give true
+        otherwise give false
+    end consider
+end paragraph

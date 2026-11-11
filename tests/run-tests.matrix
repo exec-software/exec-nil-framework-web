@@ -1,0 +1,403 @@
+!!! The test entry point: every suite runs from here and the exit code is the
+!!! verdict, so `nilinterpreter tests.nil` is the whole check.
+
+book nilweb.tests.run
+
+read everything from nilweb.tests.harness
+read nil.std.core
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.http.method
+read everything from nilweb.http.status
+read everything from nilweb.http.headers
+read everything from nilweb.http.uri
+read everything from nilweb.http.request
+read everything from nilweb.http.response
+read everything from nilweb.routing.router
+
+scan-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.text.scan"
+    value parts is split-on with input being "a/b/c", separator being "/"
+    evaluate same-number with label being "split-on counts the parts", actual being the length of parts, expected being 3
+    evaluate same-text with label being "split-on keeps the first", actual being parts at 0, expected being "a"
+    evaluate same-text with label being "split-on keeps the last", actual being parts at 2, expected being "c"
+
+    value edges is split-on with input being "/a/", separator being "/"
+    evaluate same-number with label being "a leading and trailing separator make empty parts", actual being the length of edges, expected being 3
+    evaluate same-text with label being "the part before a leading separator is empty", actual being edges at 0, expected being ""
+    evaluate same-text with label being "the part after a trailing separator is empty", actual being edges at 2, expected being ""
+
+    value whole is split-on with input being "nothing to cut", separator being "|"
+    evaluate same-number with label being "no separator gives one part", actual being the length of whole, expected being 1
+
+    evaluate same-text with label being "before-first cuts at the separator",
+        actual being (before-first with input being "name=value", separator being "="), expected being "name"
+    evaluate same-text with label being "after-first takes the remainder",
+        actual being (after-first with input being "name=value", separator being "="), expected being "value"
+    evaluate same-text with label being "after-first on a missing separator is empty",
+        actual being (after-first with input being "novalue", separator being "="), expected being ""
+    evaluate same-text with label being "after-first keeps later separators",
+        actual being (after-first with input being "a=b=c", separator being "="), expected being "b=c"
+
+    evaluate is-true with label being "field names fold case",
+        actual being (same-folded with left being "Content-Type", right being "content-type")
+    evaluate is-true with label being "different names do not fold together",
+        actual being not (same-folded with left being "Accept", right being "Accept-Encoding")
+    evaluate is-true with label being "whitespace is blank", actual being (nilweb.text.scan::is-blank with input being "   ")
+    give nothing
+end paragraph
+
+method-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.http.method"
+    evaluate same-text with label being "GET round-trips",
+        actual being (method-name with verb being (parse-method with word being "GET")), expected being "GET"
+    evaluate same-text with label being "DELETE round-trips",
+        actual being (method-name with verb being (parse-method with word being "DELETE")), expected being "DELETE"
+    evaluate is-true with label being "a known method is recognised", actual being (is-known-method with word being "PATCH")
+    evaluate is-true with label being "lower case is not a method", actual being not (is-known-method with word being "get")
+    evaluate is-true with label being "nonsense is not a method", actual being not (is-known-method with word being "BREW")
+    evaluate is-true with label being "HEAD suppresses the body",
+        actual being (body-is-suppressed with verb being request-method.Head)
+    evaluate is-true with label being "GET does not suppress the body",
+        actual being not (body-is-suppressed with verb being request-method.Get)
+    give nothing
+end paragraph
+
+status-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.http.status"
+    evaluate same-text with label being "a known code has its registered phrase",
+        actual being (reason-phrase with code being 404), expected being "Not Found"
+    evaluate same-text with label being "an unregistered 4xx still names its class",
+        actual being (reason-phrase with code being 418), expected being "Client Error"
+    evaluate same-text with label being "an unregistered 5xx still names its class",
+        actual being (reason-phrase with code being 599), expected being "Server Error"
+    evaluate same-text with label being "status-digits writes three digits", actual being (status-digits with code being 200), expected being "200"
+    evaluate same-text with label being "status-digits keeps a leading digit of 1", actual being (status-digits with code being 100), expected being "100"
+    evaluate same-text with label being "status-digits handles a middle zero", actual being (status-digits with code being 503), expected being "503"
+    evaluate same-text with label being "an impossible code renders as 500", actual being (status-digits with code being 42), expected being "500"
+    evaluate is-true with label being "204 forbids a body", actual being (status-forbids-body with code being 204)
+    evaluate is-true with label being "304 forbids a body", actual being (status-forbids-body with code being 304)
+    evaluate is-true with label being "200 permits a body", actual being not (status-forbids-body with code being 200)
+    evaluate is-true with label being "303 is a redirect", actual being (is-redirect with code being 303)
+    evaluate is-true with label being "404 is an error", actual being (is-error with code being 404)
+    evaluate is-true with label being "299 is not an error", actual being not (is-error with code being 299)
+    give nothing
+end paragraph
+
+header-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.http.headers"
+    variable fields is no-headers with nothing
+    set fields to set-field with fields being fields, name being "Content-Type", content being "text/html"
+    set fields to set-field with fields being fields, name being "Host", content being "localhost:8080"
+    evaluate same-number with label being "two fields set means two fields", actual being the length of fields, expected being 2
+    evaluate same-text with label being "a field reads back",
+        actual being (field-value with fields being fields, name being "Host"), expected being "localhost:8080"
+    evaluate same-text with label being "lookup folds case",
+        actual being (field-value with fields being fields, name being "CONTENT-TYPE"), expected being "text/html"
+    evaluate same-text with label being "an absent field reads as empty",
+        actual being (field-value with fields being fields, name being "Accept"), expected being ""
+    evaluate is-true with label being "has-field tells absent from empty",
+        actual being not (has-field with fields being fields, name being "Accept")
+
+    set fields to set-field with fields being fields, name being "content-type", content being "application/json"
+    evaluate same-number with label being "set-field replaces rather than repeats", actual being the length of fields, expected being 2
+    evaluate same-text with label being "set-field replaced the value",
+        actual being (field-value with fields being fields, name being "Content-Type"), expected being "application/json"
+
+    set fields to add-field with fields being fields, name being "Set-Cookie", content being "a=1"
+    set fields to add-field with fields being fields, name being "Set-Cookie", content being "b=2"
+    evaluate same-number with label being "add-field keeps repeats", actual being the length of fields, expected being 4
+    value cookies is field-values with fields being fields, name being "Set-Cookie"
+    evaluate same-number with label being "both cookies come back", actual being the length of cookies, expected being 2
+    evaluate same-text with label being "repeats keep their order", actual being cookies at 0, expected being "a=1"
+
+    set fields to remove-field with fields being fields, name being "set-cookie"
+    evaluate same-number with label being "remove-field drops every repeat", actual being the length of fields, expected being 2
+
+    value parsed is parse-field with line being "Accept-Encoding:  gzip, deflate  "
+    evaluate same-text with label being "a header line parses its name", actual being parsed.name, expected being "Accept-Encoding"
+    evaluate same-text with label being "a header line trims its value", actual being parsed.content, expected being "gzip, deflate"
+    value colon-in-value is parse-field with line being "Host: localhost:8080"
+    evaluate same-text with label being "only the first colon separates", actual being colon-in-value.content, expected being "localhost:8080"
+    value malformed is parse-field with line being "no colon here"
+    evaluate same-text with label being "a line with no colon yields no name", actual being malformed.name, expected being ""
+    evaluate same-number with label being "a CRLF is two characters",
+        actual being (nil.std.text::length with s being (crlf with nothing)), expected being 2
+    give nothing
+end paragraph
+
+uri-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.http.uri"
+    evaluate same-text with label being "a plus decodes to a space",
+        actual being (decode-component with raw being "hello+world"), expected being "hello world"
+    evaluate same-text with label being "an escape decodes to its byte",
+        actual being (decode-component with raw being "a%20b"), expected being "a b"
+    evaluate same-text with label being "two escapes decode to one character",
+        actual being (decode-component with raw being "caf%C3%A9"), expected being (nil.std.core::Convert.i32_to_char with code being 99) plus "af" plus (nil.std.core::Convert.i32_to_char with code being 233)
+    evaluate same-number with label being "a decoded character is its UTF-8 width, not two characters",
+        actual being (nil.std.text::length with s being (decode-component with raw being "caf%C3%A9")), expected being 5
+    evaluate same-number with label being "a three-byte escape decodes to one character",
+        actual being (nil.std.text::length with s being (decode-component with raw being "%E2%82%AC")), expected being 3
+    evaluate same-text with label being "a three-byte escape is the right character",
+        actual being (decode-component with raw being "%E2%82%AC"), expected being (nil.std.core::Convert.i32_to_char with code being 8364)
+    evaluate same-text with label being "a four-byte escape decodes past the first plane",
+        actual being (decode-component with raw being "%F0%9F%92%A1"), expected being (nil.std.core::Convert.i32_to_char with code being 128161)
+    evaluate same-text with label being "escaped text sits correctly between literal text",
+        actual being (decode-component with raw being "a%C3%A9b"), expected being "a" plus (nil.std.core::Convert.i32_to_char with code being 233) plus "b"
+    evaluate same-text with label being "a truncated sequence becomes the replacement character",
+        actual being (decode-component with raw being "%C3"), expected being (nil.std.core::Convert.i32_to_char with code being 65533)
+    evaluate same-text with label being "a lone continuation byte becomes the replacement character",
+        actual being (decode-component with raw being "%A9"), expected being (nil.std.core::Convert.i32_to_char with code being 65533)
+    evaluate same-text with label being "an overlong encoding is rejected",
+        actual being (decode-component with raw being "%C0%AF"), expected being (nil.std.core::Convert.i32_to_char with code being 65533) plus (nil.std.core::Convert.i32_to_char with code being 65533)
+    evaluate same-text with label being "a surrogate half is rejected",
+        actual being (decode-component with raw being "%ED%A0%80"), expected being (nil.std.core::Convert.i32_to_char with code being 65533) plus (nil.std.core::Convert.i32_to_char with code being 65533) plus (nil.std.core::Convert.i32_to_char with code being 65533)
+    evaluate same-text with label being "non-ASCII passes through encoding unescaped, as documented",
+        actual being (encode-component with raw being (nil.std.core::Convert.i32_to_char with code being 233)), expected being (nil.std.core::Convert.i32_to_char with code being 233)
+    evaluate same-text with label being "lower case hex decodes too",
+        actual being (decode-component with raw being "a%2fb"), expected being "a/b"
+    evaluate same-text with label being "a stray percent is kept, not dropped",
+        actual being (decode-component with raw being "100%"), expected being "100%"
+    evaluate same-text with label being "a percent with bad hex is kept",
+        actual being (decode-component with raw being "a%zzb"), expected being "a%zzb"
+
+    evaluate same-text with label being "unreserved characters pass through encoding",
+        actual being (encode-component with raw being "aZ0-._~"), expected being "aZ0-._~"
+    evaluate same-text with label being "a space encodes as %20, never a plus",
+        actual being (encode-component with raw being "a b"), expected being "a%20b"
+    evaluate same-text with label being "a separator encodes",
+        actual being (encode-component with raw being "a/b&c=d"), expected being "a%2Fb%26c%3Dd"
+    evaluate same-text with label being "encode and decode round-trip",
+        actual being (decode-component with raw being (encode-component with raw being "a b/c&d=e?f")), expected being "a b/c&d=e?f"
+
+    value parameters is parse-parameters with raw being "name=ada&role=engineer&tag=a&tag=b"
+    evaluate same-number with label being "every pair is parsed", actual being the length of parameters, expected being 4
+    evaluate same-text with label being "a parameter reads back",
+        actual being (parameter-value with parameters being parameters, name being "role"), expected being "engineer"
+    evaluate same-number with label being "a repeated name keeps both values",
+        actual being the length of (parameter-values with parameters being parameters, name being "tag"), expected being 2
+    evaluate same-text with label being "an absent parameter is empty",
+        actual being (parameter-value with parameters being parameters, name being "missing"), expected being ""
+    evaluate is-true with label being "has-parameter tells absent from empty",
+        actual being not (has-parameter with parameters being parameters, name being "missing")
+
+    value bare is parse-parameters with raw being "debug"
+    evaluate same-number with label being "a bare key is one parameter", actual being the length of bare, expected being 1
+    evaluate is-true with label being "a bare key is present", actual being (has-parameter with parameters being bare, name being "debug")
+    evaluate same-text with label being "a bare key has an empty value", actual being (parameter-value with parameters being bare, name being "debug"), expected being ""
+
+    value gappy is parse-parameters with raw being "a=1&&b=2"
+    evaluate same-number with label being "an empty segment is skipped", actual being the length of gappy, expected being 2
+    evaluate same-number with label being "an empty query has no parameters",
+        actual being the length of (parse-parameters with raw being ""), expected being 0
+
+    value encoded is parse-parameters with raw being "q=a%26b&name=ada+lovelace"
+    evaluate same-text with label being "a separator inside a value survives the split",
+        actual being (parameter-value with parameters being encoded, name being "q"), expected being "a&b"
+    evaluate same-text with label being "a form plus decodes inside a value",
+        actual being (parameter-value with parameters being encoded, name being "name"), expected being "ada lovelace"
+
+    evaluate same-text with label being "a target splits off its path",
+        actual being (target-path with target being "/users/42?tab=posts"), expected being "/users/42"
+    evaluate same-text with label being "a target splits off its query",
+        actual being (target-query with target being "/users/42?tab=posts"), expected being "tab=posts"
+    evaluate same-text with label being "a target with no query has an empty query",
+        actual being (target-query with target being "/users/42"), expected being ""
+    evaluate same-text with label being "a path is percent-decoded",
+        actual being (target-path with target being "/files/my%20report.txt"), expected being "/files/my report.txt"
+    give nothing
+end paragraph
+
+request-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.http.request"
+    value wire is "GET /users/42?tab=posts HTTP/1.1" plus (crlf with nothing)
+        plus "Host: localhost:8080" plus (crlf with nothing)
+        plus "Accept: text/html" plus (crlf with nothing)
+        plus "Cookie: session=abc123; theme=dark" plus (crlf with nothing)
+        plus (crlf with nothing)
+    value parsed is parse-request with raw being wire
+    evaluate is-true with label being "a well-formed request parses", actual being parsed.well-formed
+    evaluate same-text with label being "the method is read", actual being (method-name with verb being parsed.verb), expected being "GET"
+    evaluate same-text with label being "the path is split from the query", actual being parsed.path, expected being "/users/42"
+    evaluate same-text with label being "the query is kept", actual being parsed.query-text, expected being "tab=posts"
+    evaluate same-text with label being "the version is read", actual being parsed.version, expected being "HTTP/1.1"
+    evaluate same-number with label being "every header is kept", actual being the length of parsed.fields, expected being 3
+    evaluate same-text with label being "a header reads back",
+        actual being (header-of with request being parsed, name being "accept"), expected being "text/html"
+    evaluate same-text with label being "the host reads back", actual being (host-of with request being parsed), expected being "localhost:8080"
+    evaluate same-text with label being "a query parameter reads back",
+        actual being (query-of with request being parsed, name being "tab"), expected being "posts"
+    evaluate same-text with label being "a cookie reads back",
+        actual being (cookie-of with request being parsed, name being "session"), expected being "abc123"
+    evaluate same-text with label being "a later cookie reads back",
+        actual being (cookie-of with request being parsed, name being "theme"), expected being "dark"
+    evaluate same-text with label being "an absent cookie is empty",
+        actual being (cookie-of with request being parsed, name being "missing"), expected being ""
+    evaluate same-number with label being "a request with no body has none", actual being (body-length with request being parsed), expected being 0
+
+    value posted is parse-request with raw being ("POST /login HTTP/1.1" plus (crlf with nothing)
+        plus "Host: example.com" plus (crlf with nothing)
+        plus "Content-Type: application/x-www-form-urlencoded; charset=utf-8" plus (crlf with nothing)
+        plus (crlf with nothing)
+        plus "name=ada+lovelace&password=a%26b")
+    evaluate same-text with label being "a POST reads its method", actual being (method-name with verb being posted.verb), expected being "POST"
+    evaluate same-text with label being "the body survives the header split", actual being posted.body, expected being "name=ada+lovelace&password=a%26b"
+    evaluate same-text with label being "the media type drops its parameters",
+        actual being (content-kind with request being posted), expected being "application/x-www-form-urlencoded"
+    evaluate is-true with label being "a urlencoded body is recognised", actual being (is-form-encoded with request being posted)
+    evaluate same-text with label being "a form field decodes",
+        actual being (form-of with request being posted, name being "name"), expected being "ada lovelace"
+    evaluate same-text with label being "a form field decodes its escapes",
+        actual being (form-of with request being posted, name being "password"), expected being "a&b"
+
+    value loose is parse-request with raw being ("GET / HTTP/1.1" plus newline plus "Host: x" plus newline plus newline plus "body")
+    evaluate is-true with label being "bare LF is tolerated", actual being loose.well-formed
+    evaluate same-text with label being "a bare-LF body is found", actual being loose.body, expected being "body"
+
+    value empty is parse-request with raw being ""
+    evaluate is-true with label being "an empty request is not well formed", actual being not empty.well-formed
+    value short-line is parse-request with raw being ("GET" plus (crlf with nothing) plus (crlf with nothing))
+    evaluate is-true with label being "a short request line is not well formed", actual being not short-line.well-formed
+    value odd-verb is parse-request with raw being ("BREW /pot HTTP/1.1" plus (crlf with nothing) plus (crlf with nothing))
+    evaluate is-true with label being "an unknown method is not well formed", actual being not odd-verb.well-formed
+    evaluate is-true with label being "a malformed request says why", actual being not (odd-verb.complaint equals "")
+    give nothing
+end paragraph
+
+response-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.http.response"
+    value page is html-response with body being "<h1>hi</h1>"
+    evaluate same-number with label being "an html response is 200", actual being page.code, expected being 200
+    evaluate same-text with label being "an html response says so",
+        actual being (field-value with fields being page.fields, name being "Content-Type"), expected being "text/html; charset=utf-8"
+
+    value rendered is render-for-get with response being page
+    evaluate is-true with label being "the status line comes first",
+        actual being (nil.std.text::starts_with with s being rendered, prefix being "HTTP/1.1 200 OK")
+    evaluate is-true with label being "Content-Length is set from the body",
+        actual being (nil.std.text::contains with s being rendered, needle being "Content-Length: 11")
+    evaluate is-true with label being "a blank line separates the body",
+        actual being (nil.std.text::contains with s being rendered, needle being (crlf with nothing) plus (crlf with nothing) plus "<h1>hi</h1>")
+
+    value multibyte is render-for-get with response being (text-response with body being "caf" plus (nil.std.core::Convert.i32_to_char with code being 233))
+    evaluate is-true with label being "Content-Length counts bytes, not characters",
+        actual being (nil.std.text::contains with s being multibyte, needle being "Content-Length: 5")
+
+    value head-rendered is render-response with response being page, verb being request-method.Head
+    evaluate is-true with label being "a HEAD keeps its Content-Length",
+        actual being (nil.std.text::contains with s being head-rendered, needle being "Content-Length: 11")
+    evaluate is-true with label being "a HEAD sends no body",
+        actual being not (nil.std.text::contains with s being head-rendered, needle being "<h1>hi</h1>")
+
+    value nothing-sent is render-for-get with response being (empty-response with code being 204)
+    evaluate is-true with label being "a 204 has no Content-Length at all",
+        actual being not (nil.std.text::contains with s being nothing-sent, needle being "Content-Length")
+
+    value moved is redirect-response with location being "/after"
+    evaluate same-number with label being "a redirect is 303 by default", actual being moved.code, expected being 303
+    evaluate same-text with label being "a redirect sets Location",
+        actual being (field-value with fields being moved.fields, name being "Location"), expected being "/after"
+
+    value missing is not-found-response with path being "/nope"
+    evaluate same-number with label being "a not-found is 404", actual being missing.code, expected being 404
+    evaluate is-true with label being "a not-found names the path",
+        actual being (nil.std.text::contains with s being missing.body, needle being "/nope")
+
+    value refused is method-not-allowed-response with allowed being "GET, HEAD"
+    evaluate same-number with label being "a refusal is 405", actual being refused.code, expected being 405
+    evaluate same-text with label being "a refusal says what is allowed",
+        actual being (field-value with fields being refused.fields, name being "Allow"), expected being "GET, HEAD"
+
+    value with-two is with-cookie with response being (with-cookie with response being page, name being "a", content being "1", attributes being "HttpOnly"),
+        name being "b", content being "2", attributes being ""
+    evaluate same-number with label being "two cookies are two fields",
+        actual being the length of (field-values with fields being with-two.fields, name being "Set-Cookie"), expected being 2
+    evaluate same-text with label being "a cookie carries its attributes",
+        actual being (field-value with fields being with-two.fields, name being "Set-Cookie"), expected being "a=1; HttpOnly"
+
+    evaluate same-text with label being "count-text writes a plain number", actual being (count-text with amount being 0), expected being "0"
+    evaluate same-text with label being "count-text writes a long number", actual being (count-text with amount being 1048576), expected being "1048576"
+    give nothing
+end paragraph
+
+router-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.routing.router"
+    variable routes is no-routes with nothing
+    set routes to get-route with routes being routes, pattern being "/", handler being "home"
+    set routes to get-route with routes being routes, pattern being "/users", handler being "user-index"
+    set routes to get-route with routes being routes, pattern being "/users/new", handler being "user-new"
+    set routes to get-route with routes being routes, pattern being "/users/:id", handler being "user-show"
+    set routes to get-route with routes being routes, pattern being "/users/:id/posts/:slug", handler being "user-post"
+    set routes to post-route with routes being routes, pattern being "/users", handler being "user-create"
+    set routes to get-route with routes being routes, pattern being "/static/*rest", handler being "static"
+
+    value root is match-route with routes being routes, verb being request-method.Get, path being "/"
+    evaluate is-true with label being "the root path matches", actual being root.matched
+    evaluate same-text with label being "the root route names its handler", actual being root.handler, expected being "home"
+
+    value listing is match-route with routes being routes, verb being request-method.Get, path being "/users"
+    evaluate same-text with label being "a literal route matches", actual being listing.handler, expected being "user-index"
+
+    value literal-first is match-route with routes being routes, verb being request-method.Get, path being "/users/new"
+    evaluate same-text with label being "declaration order puts the literal before the capture",
+        actual being literal-first.handler, expected being "user-new"
+
+    value one-user is match-route with routes being routes, verb being request-method.Get, path being "/users/42"
+    evaluate same-text with label being "a capture route matches", actual being one-user.handler, expected being "user-show"
+    evaluate same-text with label being "a capture reads back by name",
+        actual being (capture-of with result being one-user, name being "id"), expected being "42"
+
+    value nested is match-route with routes being routes, verb being request-method.Get, path being "/users/42/posts/hello-world"
+    evaluate same-text with label being "two captures both match", actual being nested.handler, expected being "user-post"
+    evaluate same-text with label being "the first capture is right",
+        actual being (capture-of with result being nested, name being "id"), expected being "42"
+    evaluate same-text with label being "the second capture is right",
+        actual being (capture-of with result being nested, name being "slug"), expected being "hello-world"
+
+    value posted is match-route with routes being routes, verb being request-method.Post, path being "/users"
+    evaluate same-text with label being "the method selects between two routes on one path",
+        actual being posted.handler, expected being "user-create"
+
+    value as-head is match-route with routes being routes, verb being request-method.Head, path being "/users"
+    evaluate same-text with label being "a HEAD is served by the GET route", actual being as-head.handler, expected being "user-index"
+
+    value deep is match-route with routes being routes, verb being request-method.Get, path being "/static/css/app.css"
+    evaluate same-text with label being "a wildcard matches the rest of the path", actual being deep.handler, expected being "static"
+    evaluate same-text with label being "a wildcard captures the separators too",
+        actual being (capture-of with result being deep, name being "rest"), expected being "css/app.css"
+
+    value missing is match-route with routes being routes, verb being request-method.Get, path being "/nothing-here"
+    evaluate is-true with label being "an unclaimed path does not match", actual being not missing.matched
+    evaluate is-true with label being "an unclaimed path is a 404, not a 405", actual being not missing.path-matched
+
+    value wrong-method is match-route with routes being routes, verb being request-method.Delete, path being "/users"
+    evaluate is-true with label being "a wrong method does not match", actual being not wrong-method.matched
+    evaluate is-true with label being "a claimed path with a wrong method is a 405", actual being wrong-method.path-matched
+    evaluate same-text with label being "the 405 says what is allowed",
+        actual being wrong-method.allowed, expected being "GET, HEAD, POST"
+
+    evaluate is-true with label being "a capture does not match an empty segment",
+        actual being not (match-pattern with pattern being "/users/:id", path being "/users/").matched
+    evaluate is-true with label being "a short path does not match a long pattern",
+        actual being not (match-pattern with pattern being "/a/b/c", path being "/a/b").matched
+    evaluate is-true with label being "a long path does not match a short pattern",
+        actual being not (match-pattern with pattern being "/a/b", path being "/a/b/c").matched
+    evaluate is-true with label being "a trailing separator is ignored",
+        actual being (match-pattern with pattern being "/users", path being "/users/").matched
+    evaluate is-true with label being "a wildcard needs something to take",
+        actual being not (match-pattern with pattern being "/static/*rest", path being "/static/").matched
+    give nothing
+end paragraph
+
+main returns number begin paragraph
+    say "nilweb tests"
+    evaluate scan-tests with nothing
+    evaluate method-tests with nothing
+    evaluate status-tests with nothing
+    evaluate header-tests with nothing
+    evaluate uri-tests with nothing
+    evaluate request-tests with nothing
+    evaluate response-tests with nothing
+    evaluate router-tests with nothing
+    give verdict with nothing
+end paragraph

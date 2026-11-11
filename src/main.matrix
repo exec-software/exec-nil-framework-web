@@ -1,0 +1,159 @@
+!!! nil-web, demonstrated.
+!!!
+!!! A whole request/response cycle with no socket in it: a request arrives as
+!!! text, the router picks a handler, the handler builds a response, and the
+!!! response is rendered back to text. That is the entire framework, and it is
+!!! deliberately the entire framework — the transport calls `answer` with
+!!! whatever it read off the wire and writes back what it gets.
+!!!
+!!! The dispatch below is the shape every application using this takes: a
+!!! route table of names, and one `switch` that turns a name into a call.
+!!! Matrix has no capturing closures and cannot hold a callable in an array,
+!!! so the name is the indirection. See the router for the long version.
+
+book nilweb.main
+
+read nil.std.text
+read everything from nilweb.http.method
+read everything from nilweb.http.status
+read everything from nilweb.http.headers
+read everything from nilweb.http.request
+read everything from nilweb.http.response
+read everything from nilweb.http.uri
+read everything from nilweb.routing.router
+
+
+!!! --- The application's route table.
+
+demo-routes returns array of route begin paragraph
+    variable routes is no-routes with nothing
+    set routes to get-route with routes being routes, pattern being "/", handler being "home"
+    set routes to get-route with routes being routes, pattern being "/hello/:name", handler being "hello"
+    set routes to get-route with routes being routes, pattern being "/search", handler being "search"
+    set routes to post-route with routes being routes, pattern being "/users", handler being "create-user"
+    give routes
+end paragraph
+
+
+!!! --- One request in, one response out. This is what a transport calls.
+
+public answer receives raw as text returns text begin paragraph
+    value request is parse-request with raw being raw
+    when not request.well-formed then
+        give render-for-get with response being
+            (error-response with code being status-bad-request, explanation being request.complaint)
+    end when
+
+    value found is match-route with routes being (demo-routes with nothing),
+        verb being request.verb, path being request.path
+
+    when not found.matched then
+        value refusal is when found.path-matched
+            give method-not-allowed-response with allowed being found.allowed
+            otherwise give not-found-response with path being request.path
+        end when
+        give render-response with response being refusal, verb being request.verb
+    end when
+
+    give render-response with response being (run-handler with name being found.handler,
+        request being request, found being found), verb being request.verb
+end paragraph
+
+
+!!! --- The one switch an application owns. A name with no case here is a
+!!! wiring mistake, and it answers 500 saying which name, rather than
+!!! silently answering 404 as though the route had never been declared.
+
+run-handler receives name as text, request as http-request, found as route-result
+    returns http-response begin paragraph
+    give switch name
+        case "home" then
+            stop switching with (home-page with nothing)
+        case "hello" then
+            stop switching with (hello-page with found being found)
+        case "search" then
+            stop switching with (search-page with request being request)
+        case "create-user" then
+            stop switching with (create-user with request being request)
+        otherwise
+            stop switching with (error-response with code being status-internal-error,
+                explanation being "No handler is wired for the name " plus quote plus name plus quote)
+    end switch
+end paragraph
+
+
+home-page returns http-response begin paragraph
+    give html-response with body being "<!doctype html>" plus newline
+        plus "<title>nil-web</title>" plus newline
+        plus "<h1>nil-web</h1>" plus newline
+        plus "<p>A web framework in Matrix.</p>" plus newline
+end paragraph
+
+
+hello-page receives found as route-result returns http-response begin paragraph
+    value who is capture-of with result being found, name being "name"
+    give html-response with body being "<h1>Hello, " plus who plus "</h1>" plus newline
+end paragraph
+
+
+search-page receives request as http-request returns http-response begin paragraph
+    value term is query-of with request being request, name being "q"
+    when term equals "" then
+        give error-response with code being status-bad-request, explanation being "Pass a search term as ?q="
+    end when
+    give text-response with body being "Searching for: " plus term plus newline
+end paragraph
+
+
+create-user receives request as http-request returns http-response begin paragraph
+    when not (is-form-encoded with request being request) then
+        give error-response with code being status-unsupported-media-type,
+            explanation being "Send application/x-www-form-urlencoded"
+    end when
+    value name is form-of with request being request, name being "name"
+    when name equals "" then
+        give error-response with code being status-unprocessable, explanation being "A user needs a name"
+    end when
+    give redirect-response with location being "/hello/" plus (encode-component with raw being name)
+end paragraph
+
+
+!!! --- A request as it would arrive, for the demonstration below.
+
+wire-request receives line as text, fields as text, body as text returns text begin paragraph
+    !!! Two CRLFs after the fields, not one: the blank line is what ends the
+    !!! header section, and a message with only one is a message whose body is
+    !!! read as another header.
+    give line plus (crlf with nothing) plus fields plus (crlf with nothing) plus (crlf with nothing) plus body
+end paragraph
+
+
+show receives title as text, raw as text returns nothing begin paragraph
+    say ""
+    say "=== " plus title
+    say answer with raw being raw
+    give nothing
+end paragraph
+
+
+main returns number begin paragraph
+    say "nil-web demonstration: requests in, responses out, no socket."
+
+    evaluate show with title being "GET /",
+        raw being (wire-request with line being "GET / HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "GET /hello/ada",
+        raw being (wire-request with line being "GET /hello/ada HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "GET /search?q=matrix+web",
+        raw being (wire-request with line being "GET /search?q=matrix+web HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "GET /search (no term)",
+        raw being (wire-request with line being "GET /search HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "POST /users",
+        raw being (wire-request with line being "POST /users HTTP/1.1",
+            fields being "Host: localhost" plus (crlf with nothing) plus "Content-Type: application/x-www-form-urlencoded",
+            body being "name=Ada+Lovelace")
+    evaluate show with title being "DELETE /users (wrong method)",
+        raw being (wire-request with line being "DELETE /users HTTP/1.1", fields being "Host: localhost", body being "")
+    evaluate show with title being "GET /nowhere",
+        raw being (wire-request with line being "GET /nowhere HTTP/1.1", fields being "Host: localhost", body being "")
+    give 0
+end paragraph

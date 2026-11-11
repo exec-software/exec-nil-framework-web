@@ -1,0 +1,3 @@
+build/
+*.nil
+*.hot*.so

@@ -1,0 +1,116 @@
+!!! A test harness small enough to trust.
+!!!
+!!! niltest exists, but a framework this young is better served by something
+!!! with no moving parts: a counter, a comparison, and a non-zero exit when
+!!! anything failed. Every check prints its own line so a failure names itself
+!!! rather than only showing up in a total.
+
+book nilweb.tests.harness
+
+public variable checks-run as number is 0
+public variable checks-failed as number is 0
+
+
+!!! --- Assert two texts are equal.
+
+public same-text receives label as text, actual as text, expected as text returns nothing begin paragraph
+    set nilweb.tests.harness::checks-run to nilweb.tests.harness::checks-run plus 1
+    when actual equals expected then
+        say "  ok   " plus label
+    otherwise
+        set nilweb.tests.harness::checks-failed to nilweb.tests.harness::checks-failed plus 1
+        say "  FAIL " plus label
+        say "         expected: " plus quote plus expected plus quote
+        say "         actual:   " plus quote plus actual plus quote
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- Assert two numbers are equal.
+
+public same-number receives label as text, actual as number, expected as number returns nothing begin paragraph
+    set nilweb.tests.harness::checks-run to nilweb.tests.harness::checks-run plus 1
+    when actual equals expected then
+        say "  ok   " plus label
+    otherwise
+        set nilweb.tests.harness::checks-failed to nilweb.tests.harness::checks-failed plus 1
+        say "  FAIL " plus label
+        say "         expected: " plus (nilweb.tests.harness::as-text with amount being expected)
+        say "         actual:   " plus (nilweb.tests.harness::as-text with amount being actual)
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- Assert a condition holds.
+
+public is-true receives label as text, actual as boolean returns nothing begin paragraph
+    set nilweb.tests.harness::checks-run to nilweb.tests.harness::checks-run plus 1
+    when actual then
+        say "  ok   " plus label
+    otherwise
+        set nilweb.tests.harness::checks-failed to nilweb.tests.harness::checks-failed plus 1
+        say "  FAIL " plus label plus " (expected true)"
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- A section heading, so a long run reads as groups rather than a wall.
+
+public section receives title as text returns nothing begin paragraph
+    say ""
+    say title
+    give nothing
+end paragraph
+
+
+!!! --- The process result: 0 when everything passed.
+
+public verdict returns number begin paragraph
+    say ""
+    when nilweb.tests.harness::checks-failed equals 0 then
+        say (nilweb.tests.harness::as-text with amount being nilweb.tests.harness::checks-run) plus " checks, all passed."
+        give 0
+    end when
+    say (nilweb.tests.harness::as-text with amount being nilweb.tests.harness::checks-failed) plus " of "
+        plus (nilweb.tests.harness::as-text with amount being nilweb.tests.harness::checks-run) plus " checks FAILED."
+    give 1
+end paragraph
+
+
+!!! --- Whole numbers as text, for the messages above.
+
+public as-text receives amount as number returns text begin paragraph
+    when amount equals 0 then give "0" end when
+    variable rest as number is amount
+    variable sign as text is ""
+    when amount is less than 0 then
+        set sign to "-"
+        set rest to 0 minus amount
+    end when
+    variable out as text is ""
+    repeat while rest is greater than 0
+        value digit is rest remainder 10
+        set out to (nilweb.tests.harness::digit-text with digit being digit) plus out
+        set rest to rest over 10
+    end repeat
+    give sign plus out
+end paragraph
+
+
+digit-text receives digit as number returns text begin paragraph
+    give switch digit
+        case 0 then stop switching with "0"
+        case 1 then stop switching with "1"
+        case 2 then stop switching with "2"
+        case 3 then stop switching with "3"
+        case 4 then stop switching with "4"
+        case 5 then stop switching with "5"
+        case 6 then stop switching with "6"
+        case 7 then stop switching with "7"
+        case 8 then stop switching with "8"
+        otherwise stop switching with "9"
+    end switch
+end paragraph
