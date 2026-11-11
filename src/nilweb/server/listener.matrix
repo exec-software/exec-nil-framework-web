@@ -1,0 +1,283 @@
+!!! The accept loop.
+!!!
+!!! Everything above this module works on text: a request arrives as text and
+!!! a response leaves as text, which is what makes a handler testable with no
+!!! server running. This is the one place that touches a socket, and it is
+!!! deliberately the only one.
+!!!
+!!! One connection at a time. There are no threads to hand a connection to,
+!!! no async in the language and no way to wait on several sockets at once, so
+!!! this accepts, serves, closes, and goes round again. That is enough for a
+!!! development server, a local tool, or anything behind a reverse proxy that
+!!! absorbs the slow clients, and it is honest about what it is rather than
+!!! appearing to scale and then not.
+!!!
+!!! The caller owns dispatch. `serve-once` reads a request, hands the text to
+!!! whatever the application does with it, and writes the answer back, so the
+!!! routing, the templates and the sessions above are reached by the
+!!! application's own paragraph rather than by a callback this module holds —
+!!! Matrix has no capturing closures, so a callback is not available to hold.
+
+book nilweb.server.listener
+
+read nil.std.core
+read nil.std.net.socket
+read nil.std.text
+read nil.std.text.string_utils
+read everything from nilweb.text.scan
+read everything from nilweb.http.headers
+
+
+!!! How long a connection may stay silent before it is dropped.
+!!!
+!!! Not optional. A single-threaded loop with no deadline is one open-and-say-
+!!! nothing connection away from serving nobody, and that is as easy to do by
+!!! accident with a port scanner as on purpose.
+constant silence-limit-ms as number is 15000
+
+!!! The most a request may be, header and body together.
+!!!
+!!! A ceiling here rather than at the parser, because the point is to stop
+!!! reading rather than to reject afterwards. 1 MiB is generous for a form and
+!!! far below anything that would trouble the process.
+constant request-limit as number is 1048576
+
+!!! One read per pass. Large enough that an ordinary request arrives whole.
+constant chunk-size as number is 65536
+
+
+public bound-server begin record
+    field listener as number
+    field listening as boolean
+    field complaint as text
+end record
+
+
+!!! --- Bind a port, or say why not.
+!!!
+!!! The host is passed through to the intrinsic, which takes numeric, empty or
+!!! localhost and will not resolve a name. "127.0.0.1" during development;
+!!! empty for every interface, which is a decision to make deliberately.
+
+public bind-server receives host as text, port as number returns bound-server begin paragraph
+    value opened is nil.std.net::listen with host being host, port being port, backlog being 64
+    consider opened
+        when Result.Ok holding handle then
+            give build bound-server with listener being handle, listening being true, complaint being ""
+        when Result.Error holding why then
+            give build bound-server with listener being 0, listening being false, complaint being why
+        otherwise
+            give build bound-server with listener being 0, listening being false,
+                complaint being "the port could not be bound"
+    end consider
+end paragraph
+
+
+public stop-server receives server as bound-server returns nothing begin paragraph
+    when server.listening then
+        evaluate nil.std.net::close with handle being server.listener
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- What one pass round the loop produced.
+!!!
+!!! `request` is the message as it arrived, for the application to answer.
+!!! `served` false with an empty complaint is an ordinary non-event — a
+!!! connection that closed before saying anything, which happens whenever a
+!!! browser opens a speculative socket — and is not worth logging.
+
+public accepted begin record
+    field connection as number
+    field accepted-ok as boolean
+    field request as text
+    field served as boolean
+    field complaint as text
+end record
+
+
+!!! --- Accept one connection and read its request.
+!!!
+!!! Reads until the header section is complete and then until Content-Length
+!!! is satisfied, rather than taking whatever one read returns: a request is a
+!!! stream and arrives in as many pieces as the network feels like. A client
+!!! that sends a header section and stops is ended by the deadline, not by
+!!! this loop guessing.
+
+public accept-request receives server as bound-server returns accepted begin paragraph
+    when not server.listening then
+        give build accepted with connection being 0, accepted-ok being false, request being "",
+            served being false, complaint being "the server is not listening"
+    end when
+
+    value taken is nil.std.net::accept with handle being server.listener
+    consider taken
+        when Result.Error holding why then
+            give build accepted with connection being 0, accepted-ok being false, request being "",
+                served being false, complaint being why
+        when Result.Ok holding connection then begin block
+            evaluate nil.std.net::set_timeout with handle being connection, milliseconds being silence-limit-ms
+            evaluate nil.std.net::set_no_delay with handle being connection, enabled being true
+            give read-request with connection being connection
+        end block
+        otherwise
+            give build accepted with connection being 0, accepted-ok being false, request being "",
+                served being false, complaint being "accept gave no answer"
+    end consider
+end paragraph
+
+
+read-request receives connection as number returns accepted begin paragraph
+    variable gathered as text is ""
+    variable finished as boolean is false
+    variable complaint as text is ""
+
+    repeat while not finished
+        value heard is nil.std.net::read with handle being connection, maximum_bytes being chunk-size
+        consider heard
+            when Result.Error holding why then begin block
+                set complaint to why
+                set finished to true
+            end block
+            when Result.Ok holding piece then begin block
+                !!! Flat rather than nested: a branch holding its own `when`
+                !!! needs an explicit arm block, and four plain conditions are
+                !!! easier to check than one with three tails.
+                !!!
+                !!! Empty means the peer closed its side. If nothing arrived
+                !!! at all it was a connection that never asked anything.
+                value closed is piece equals ""
+                when closed then
+                    set finished to true
+                end when
+                when not closed then
+                    set gathered to gathered plus piece
+                end when
+                value too-large is (nil.std.text::length with s being gathered) is greater than request-limit
+                when not closed and too-large then
+                    set complaint to "the request is larger than this server accepts"
+                    set finished to true
+                end when
+                when not closed and not too-large and (request-is-complete with message being gathered) then
+                    set finished to true
+                end when
+            end block
+            otherwise begin block
+                set complaint to "the read gave no answer"
+                set finished to true
+            end block
+        end consider
+    end repeat
+
+    value served is complaint equals "" and not (gathered equals "")
+    give build accepted with connection being connection, accepted-ok being true,
+        request being gathered, served being served, complaint being complaint
+end paragraph
+
+
+!!! --- Whether enough of the message has arrived to answer it.
+!!!
+!!! The header section ends at the first blank line. After that, a body is
+!!! expected only if Content-Length says so — this server does not accept
+!!! chunked transfer encoding, and a request that asks for it is answered by
+!!! the layer above rather than waited on here.
+
+public request-is-complete receives message as text returns boolean begin paragraph
+    value marker is (crlf with nothing) plus (crlf with nothing)
+    variable head-length as number is nil.std.text::index_of with s being message, needle being marker
+    variable separator as number is 4
+    when head-length is less than 0 then
+        set head-length to nil.std.text::index_of with s being message, needle being newline plus newline
+        set separator to 2
+    end when
+    when head-length is less than 0 then
+        give false
+    end when
+
+    value head is nil.std.text::substring with s being message, start being 0, length being head-length
+    value declared is declared-length with head being head
+    when declared is at most 0 then
+        give true
+    end when
+    value body-start is head-length plus separator
+    value body-so-far is (nil.std.text::length with s being message) minus body-start
+    give body-so-far is at least declared
+end paragraph
+
+
+!!! --- Content-Length from the header section, or zero when it is absent.
+!!! A value that is not a number reads as zero, which means the body is not
+!!! waited for; the parser above will reject the request on its own terms.
+
+declared-length receives head as text returns number begin paragraph
+    value lines is split-on with input being head, separator being newline
+    repeat for each line in lines
+        value trimmed is nil.std.text::trim with s being line
+        value name is nil.std.text::trim with s being (before-first with input being trimmed, separator being ":")
+        when same-folded with left being name, right being "Content-Length" then
+            value stated is nil.std.text::trim with s being (after-first with input being trimmed, separator being ":")
+            give digits-value with digits being stated
+        end when
+    end repeat
+    give 0
+end paragraph
+
+
+!!! --- A decimal count, without borrowing a parser that raises on bad input.
+!!! Anything that is not all digits is zero: a Content-Length a client made up
+!!! must not be able to stop the server with a fault.
+
+digits-value receives digits as text returns number begin paragraph
+    value width is nil.std.text::length with s being digits
+    when width is less than 1 or width is greater than 18 then
+        give 0
+    end when
+    variable total as number is 0
+    variable index as number is 0
+    repeat while index is less than width
+        value code is nil.std.text::byte_at with s being digits, index being index
+        when code is less than 48 or code is greater than 57 then
+            give 0
+        end when
+        set total to (total times 10) plus (code minus 48)
+        set index to index plus 1
+    end repeat
+    give total
+end paragraph
+
+
+!!! --- Send a response and close.
+!!!
+!!! Always closes, including when the write failed: this server speaks no
+!!! keep-alive, so the connection has no further use, and a connection left
+!!! open after a failed write is a descriptor nobody will come back for.
+!!! A failed write is reported rather than raised — a peer that left before
+!!! its answer arrived is a Tuesday, not an error in the program.
+
+public answer-and-close receives connection as number, response as text returns text begin paragraph
+    variable complaint as text is ""
+    value sent is nil.std.net::write with handle being connection, data being response
+    consider sent
+        when Result.Error holding why then set complaint to why
+        otherwise set complaint to ""
+    end consider
+    evaluate nil.std.net::close with handle being connection
+    give complaint
+end paragraph
+
+
+!!! --- Close a connection that is not going to be answered.
+
+public discard receives connection as number returns nothing begin paragraph
+    evaluate nil.std.net::close with handle being connection
+    give nothing
+end paragraph
+
+
+!!! --- Where the server can be reached, for the line printed at startup.
+
+public address-text receives host as text, port as number returns text begin paragraph
+    value shown is when host equals "" give "0.0.0.0" otherwise give host end when
+    give "http://" plus shown plus ":" plus (port becomes text) plus "/"
+end paragraph

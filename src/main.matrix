@@ -15,6 +15,8 @@
 book nilweb.main
 
 read nil.std.text
+read nil.std.text.string_utils
+read nil.std.core
 read everything from nilweb.http.method
 read everything from nilweb.http.status
 read everything from nilweb.http.headers
@@ -27,6 +29,8 @@ read everything from nilweb.template.render
 read everything from nilweb.session.session
 read everything from nilweb.static.files
 read everything from nilweb.middleware.chain
+read everything from nilweb.server.listener
+read nil.std.system.environment
 
 
 !!! Where the templates and the public files live, relative to the working
@@ -226,8 +230,102 @@ show receives title as text, raw as text returns nothing begin paragraph
 end paragraph
 
 
+!!! --- Serve for real.
+!!!
+!!! One connection at a time, which is what the language allows: no threads to
+!!! hand a connection to, and no way to wait on several sockets at once. Good
+!!! enough for development and for anything behind a proxy, and honest about
+!!! being so.
+!!!
+!!! The loop owns no routing. It reads a request, hands the text to `answer`,
+!!! and writes back what comes out — the same `answer` the demonstration below
+!!! calls with a fixture, so what is served is exactly what is tested.
+
+serve receives host as text, port as number returns number begin paragraph
+    value server is bind-server with host being host, port being port
+    when not server.listening then
+        say "nil-web could not listen: " plus server.complaint
+        give 1
+    end when
+    say "nil-web listening on " plus (address-text with host being host, port being port)
+    say "Ctrl-C to stop."
+
+    repeat forever
+        value incoming is accept-request with server being server
+        when not incoming.accepted-ok then
+            say "accept failed: " plus incoming.complaint
+        end when
+        when incoming.accepted-ok and not incoming.served then
+            !!! A connection that closed before asking anything, or one whose
+            !!! read failed. Browsers open speculative sockets constantly, so
+            !!! this is not worth a line unless something was actually wrong.
+            when not (incoming.complaint equals "") then
+                say "request dropped: " plus incoming.complaint
+            end when
+            evaluate discard with connection being incoming.connection
+        end when
+        when incoming.accepted-ok and incoming.served then
+            value reply is answer with raw being incoming.request
+            value trouble is answer-and-close with connection being incoming.connection, response being reply
+            when not (trouble equals "") then
+                say "response not delivered: " plus trouble
+            end when
+        end when
+    end repeat
+    evaluate stop-server with server being server
+    give 0
+end paragraph
+
+
+!!! --- The port to serve on, from NILWEB_PORT, defaulting to 8080.
+
+chosen-port returns number begin paragraph
+    value stated is nil.std.system::get_environment_variable with name being "NILWEB_PORT"
+    consider stated
+        when Option.Some holding text-held then begin block
+            value parsed is digits-of with digits being text-held
+            give when parsed is at least 1 give parsed otherwise give 8080 end when
+        end block
+        otherwise give 8080
+    end consider
+end paragraph
+
+
+digits-of receives digits as text returns number begin paragraph
+    value width is nil.std.text::length with s being digits
+    when width is less than 1 or width is greater than 5 then
+        give 0
+    end when
+    variable total as number is 0
+    variable index as number is 0
+    repeat while index is less than width
+        value code is nil.std.text::byte_at with s being digits, index being index
+        when code is less than 48 or code is greater than 57 then
+            give 0
+        end when
+        set total to (total times 10) plus (code minus 48)
+        set index to index plus 1
+    end repeat
+    give total
+end paragraph
+
+
 main returns number begin paragraph
-    say "nil-web demonstration: requests in, responses out, no socket."
+    !!! With NILWEB_SERVE set, this is a server. Without it, it prints the
+    !!! same requests through the same `answer`, which is what makes the
+    !!! demonstration a demonstration of the thing that actually serves.
+    value serving is nil.std.system::get_environment_variable with name being "NILWEB_SERVE"
+    consider serving
+        when Option.Some holding wanted then begin block
+            when not (wanted equals "") then
+                give serve with host being "127.0.0.1", port being (chosen-port with nothing)
+            end when
+        end block
+        otherwise say ""
+    end consider
+
+    say "nil-web demonstration: requests in, responses out."
+    say "Set NILWEB_SERVE=1 to serve on 127.0.0.1 (NILWEB_PORT, default 8080)."
 
     evaluate show with title being "GET / (template, layout, partial)",
         raw being (wire-request with line being "GET / HTTP/1.1", fields being "Host: localhost", body being "")

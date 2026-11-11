@@ -1,32 +1,29 @@
 !!! Sessions: server-side state keyed by a cookie.
 !!!
-!!! READ THIS BEFORE USING IT IN PRODUCTION.
+!!! A session id is a bearer credential: whoever holds one is the user. It
+!!! comes from nil.std.security's random_hex, which asks the operating system
+!!! and has no fallback to a weak source -- sixteen bytes, thirty-two hex
+!!! characters.
 !!!
-!!! This module does not generate session identifiers, and that is deliberate.
-!!! A session id is a bearer credential: anyone holding one is the user. It
-!!! must come from a cryptographically secure source, and there is no such
-!!! source reachable from Matrix today:
+!!! This module used to refuse to generate one. Until the framework grew the
+!!! intrinsic there was nothing cryptographically secure reachable from
+!!! Matrix: nil.std.math is MINSTD seeded at 12345 and says itself it is not
+!!! cryptographic, there was no hash or HMAC, and /dev/urandom could not be
+!!! read because the file intrinsics refuse a character device. So
+!!! `start-session` took the id from its caller and a clearly-labelled
+!!! development generator existed so the tests could run. Both are gone: the
+!!! generator because nothing should offer a predictable credential, and the
+!!! caller's burden because it only existed to work around the gap.
 !!!
-!!!   * nil.std.math is MINSTD, a 31-bit linear congruential generator whose
-!!!     global stream starts at the seed 12345. Its own documentation says
-!!!     "neither API is cryptographic". Two draws reveal the stream.
-!!!   * nil.std.security has base64 and hex, and no hash, no HMAC, no random.
-!!!   * The runtime has no crypto or random intrinsic of any kind.
-!!!   * /dev/urandom cannot be read: file.read_regular_bytes refuses a
-!!!     character device by design, and file.read_bytes returns empty for one.
-!!!
-!!! So `start-session` takes the id from its caller, and the caller is
-!!! expected to get it from the same native shim that will be providing the
-!!! socket — `getrandom(2)` is one more export on a library that has to exist
-!!! anyway. `development-id` below exists so the tests and the demo can run,
-!!! is named so it cannot be used by accident, and says what it is.
-!!!
-!!! Everything else here — expiry, the store, and above all the cookie
-!!! attributes — is the part that can be got right today, and is.
+!!! `new-session-id` can still fail, and says so rather than returning empty
+!!! text. A machine whose kernel cannot provide entropy must not get a
+!!! session; the answer there is a 500, not a guessable id.
 
 book nilweb.session.session
 
 read nil.std.text
+read nil.std.security.random
+read nil.std.core
 read everything from nilweb.text.scan
 read everything from nilweb.http.headers
 read everything from nilweb.http.request
@@ -244,17 +241,62 @@ public with-ended-cookie receives response as http-response, secure as boolean r
 end paragraph
 
 
-!!! --- A session id for development and tests. NOT A CREDENTIAL.
+!!! --- A fresh session identifier.
 !!!
-!!! Derived from a counter and a caller-supplied number, so it is unique
-!!! within one run and entirely predictable from outside it. Anyone who can
-!!! guess the time your process started can guess every id it will ever issue.
-!!! It is here so the demo runs, and it is named so that `development-id`
-!!! appearing in a production diff is the review comment writing itself.
+!!! Sixteen bytes of kernel entropy as thirty-two hex characters. Hex because
+!!! a credential wants to be text anyway and hex survives a cookie, a URL, a
+!!! header and a log line with nothing further to escape.
+!!!
+!!! `available` false means the entropy source would not answer. There is no
+!!! fallback and there should not be: a predictable session id is worse than
+!!! no session, because the failure is invisible until someone else is reading
+!!! another user's pages.
 
-public variable issued as number is 0
+public fresh-id begin record
+    field id as text
+    field available as boolean
+    field complaint as text
+end record
 
-public development-id receives now-at as number returns text begin paragraph
-    set nilweb.session.session::issued to nilweb.session.session::issued plus 1
-    give "dev-" plus (now-at becomes text) plus "-" plus (nilweb.session.session::issued becomes text)
+
+public new-session-id returns fresh-id begin paragraph
+    value drawn is nil.std.security::random_hex with byte_count being 16
+    consider drawn
+        when Result.Ok holding token then
+            give build fresh-id with id being token, available being true, complaint being ""
+        when Result.Error holding why then
+            give build fresh-id with id being "", available being false, complaint being why
+        otherwise
+            give build fresh-id with id being "", available being false,
+                complaint being "the entropy source gave no answer"
+    end consider
+end paragraph
+
+
+!!! --- Begin a session under a fresh identifier, in one step.
+!!!
+!!! What a sign-in handler actually wants. It still has to look at
+!!! `available`: a store that came back unchanged with an unavailable id is a
+!!! session that was not created, and treating it as one would hand the
+!!! visitor a cookie naming nothing.
+
+public started begin record
+    field store as session-store
+    field id as text
+    field available as boolean
+    field complaint as text
+end record
+
+
+public begin-session receives store as session-store, now-at as number returns started begin paragraph
+    value drawn is new-session-id with nothing
+    when not drawn.available then
+        give build started with store being store, id being "", available being false,
+            complaint being drawn.complaint
+    end when
+    give build started with
+        store being (start-session with store being store, id being drawn.id, now-at being now-at),
+        id being drawn.id,
+        available being true,
+        complaint being ""
 end paragraph

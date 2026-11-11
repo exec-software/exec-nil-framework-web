@@ -13,6 +13,7 @@ book nilweb.http.uri
 
 read nil.std.core
 read nil.std.text
+read nil.std.text.string_utils
 read everything from nilweb.text.scan
 
 
@@ -171,44 +172,30 @@ is-hex-digit receives digit as text returns boolean begin paragraph
 end paragraph
 
 
-!!! --- Encode one component for a query string.
+!!! --- Encode one component for a query string or a path segment.
 !!!
-!!! The unreserved set of RFC 3986 passes through; every other ASCII byte is
+!!! The unreserved set of RFC 3986 passes through; every other byte is
 !!! escaped. Space becomes %20 and not `+`, because %20 is correct in both a
 !!! path and a query while `+` is correct in neither except a form body.
 !!!
-!!! KNOWN LIMIT — non-ASCII bytes are passed through unescaped.
-!!!
-!!! Escaping one would mean reading its numeric value, and nothing reachable
-!!! from Matrix can do that. nil.std.text slices by byte but has no byte-to-
-!!! number conversion, and nil.std.core's char_to_i32 takes a whole Unicode
-!!! scalar and *aborts the process* on a partial one — not a fault that can be
-!!! caught, a fatal runtime error. So a byte of a multi-byte character cannot
-!!! be inspected, and a multi-byte character cannot be isolated to inspect
-!!! whole, because isolating it needs the same byte test.
-!!!
-!!! Decoding has no such hole: it works in byte values throughout and is
-!!! correct for all of Unicode. This is the one direction that is short, and
-!!! it closes the day nil.std.text grows a `byte_at`. Until then, a caller
-!!! encoding text that may be non-ASCII should know that what comes back is a
-!!! valid URL only if the input was ASCII.
+!!! Byte by byte, which is what RFC 3986 specifies: a character outside ASCII
+!!! is percent-encoded as each of its UTF-8 bytes in turn, so "é" becomes
+!!! %C3%A9. This was unreachable until nil.std.text grew byte_at and
+!!! from_byte -- there was no way to read a byte as a number, and the
+!!! conversion that looked like it would aborted the process on a byte that
+!!! was not a whole character. The earlier version of this paragraph passed
+!!! non-ASCII through unescaped and said so in a comment.
 
 public encode-component receives raw as text returns text begin paragraph
     value width is nil.std.text::length with s being raw
     variable out as text is ""
     variable index as number is 0
     repeat while index is less than width
-        value here is nil.std.text::substring with s being raw, start being index, length being 1
-        when is-unreserved with glyph being here then
-            set out to out plus here
+        value code is nil.std.text::byte_at with s being raw, index being index
+        when is-unreserved-byte with code being code then
+            set out to out plus (nil.std.text::from_byte with code being code)
         otherwise
-            value code is ascii-code-of with glyph being here
-            when code is less than 0 then
-                !!! Not an ASCII byte: see the limit above.
-                set out to out plus here
-            otherwise
-                set out to out plus "%" plus (two-hex with code being code)
-            end when
+            set out to out plus "%" plus (two-hex with code being code)
         end when
         set index to index plus 1
     end repeat
@@ -216,30 +203,18 @@ public encode-component receives raw as text returns text begin paragraph
 end paragraph
 
 
-!!! --- A byte's value, or minus one when it is not an ASCII byte.
+!!! --- The unreserved set, by byte value: A-Z, a-z, 0-9, and - . _ ~
 !!!
-!!! By comparison rather than conversion, because conversion is the thing that
-!!! aborts. Only runs for a byte already known not to be unreserved, so the
-!!! common path through encode-component never reaches it.
+!!! Spelled as ranges rather than as a list of characters because that is what
+!!! the grammar says, and because a byte above 127 is then excluded by
+!!! construction rather than by having been left off a list.
 
-ascii-code-of receives glyph as text returns number begin paragraph
-    variable code as number is 0
-    repeat while code is less than 128
-        when glyph equals (nil.std.core::Convert.i32_to_char with code being code) then
-            give code
-        end when
-        set code to code plus 1
-    end repeat
-    give 0 minus 1
-end paragraph
-
-
-is-unreserved receives glyph as text returns boolean begin paragraph
-    value folded is nil.std.text::to_lower with s being glyph
-    value is-glyph is folded is at least "a" and folded is at most "z"
-    value is-digit is glyph is at least "0" and glyph is at most "9"
-    give is-glyph or is-digit or glyph equals "-" or glyph equals "."
-        or glyph equals "_" or glyph equals "~"
+is-unreserved-byte receives code as number returns boolean begin paragraph
+    value is-upper is code is at least 65 and code is at most 90
+    value is-lower is code is at least 97 and code is at most 122
+    value is-digit is code is at least 48 and code is at most 57
+    value is-mark is code equals 45 or code equals 46 or code equals 95 or code equals 126
+    give is-upper or is-lower or is-digit or is-mark
 end paragraph
 
 

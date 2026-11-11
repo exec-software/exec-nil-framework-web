@@ -35,19 +35,15 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/source-scanner/gitleaks" dir . --no-banner --redact
           "$RUNNER_TEMP/source-scanner/gitleaks" git . --no-banner --redact
-      - name: Refuse absolute paths, addresses and contact details
+      - name: Refuse absolute paths, routable addresses and contact details
         shell: bash
         run: |
           set -euo pipefail
-          # A framework's source has no business naming a developer's home
-          # directory, a machine on anyone's network, or a person. Findings
-          # are printed as counts and paths, never as the matching line.
-          if git grep -nIE '/home/[a-z]|/Users/[A-Za-z]|[0-9]{1,3}(\.[0-9]{1,3}){3}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
-               -- . ':(exclude).github/workflows/audit.yml' > /dev/null 2>&1; then
-            echo "Found an absolute path, an IP address or an email address in:"
-            git grep -lIE '/home/[a-z]|/Users/[A-Za-z]|[0-9]{1,3}(\.[0-9]{1,3}){3}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
-               -- . ':(exclude).github/workflows/audit.yml'
-            exit 1
-          fi
+          # Not a secret scan: a home-directory path leaks a name and a
+          # working habit, and no scanner built for API keys will mention it.
+          # Loopback, the unspecified address and the RFC 5737/3849
+          # documentation ranges are allowed, because a server has to name an
+          # address it binds. See scripts/audit-paths.py for the reasoning.
+          python3 scripts/audit-paths.py --root .
       # Scan reports are not uploaded. Even redacted findings can expose
       # filenames, commit messages and surrounding source context.

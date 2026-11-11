@@ -10,7 +10,8 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-Everything above the transport is built and tested — 241 checks, all passing.
+Built and tested end to end — 272 checks, all passing, and a server that
+serves.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -18,55 +19,58 @@ Everything above the transport is built and tested — 241 checks, all passing.
 | `nilweb.http.method` | the request methods, parsed and spelled | done |
 | `nilweb.http.status` | status codes, reason phrases, body rules | done |
 | `nilweb.http.headers` | case-insensitive fields that keep order and repeats | done |
-| `nilweb.http.uri` | percent coding, query strings, form bodies | done (one documented limit) |
+| `nilweb.http.uri` | percent coding, query strings, form bodies | done |
 | `nilweb.http.request` | parsing a whole request message | done |
 | `nilweb.http.response` | building and rendering a response | done |
 | `nilweb.routing.router` | patterns, captures, wildcards, 404 vs 405 | done |
 | `nilweb.template.context` | the data a template may read | done |
 | `nilweb.template.render` | `.nilhtml` with layouts, partials, loops, escaping | done |
-| `nilweb.session.session` | a server-side store and the cookie attributes | done (ids are the caller's — see below) |
+| `nilweb.session.session` | a server-side store, secure ids, cookie attributes | done |
 | `nilweb.static.files` | serving a directory, with the traversal checks | done |
 | `nilweb.middleware.chain` | guards before a handler, finishers after | done |
-| **transport** | **accepting a connection** | **blocked — see below** |
+| `nilweb.server.listener` | binding, accepting, request framing | done |
 
 ```sh
-./scripts/test.sh    # 241 checks
-./scripts/demo.sh    # requests in, responses out
+./scripts/serve.sh   # a real server on 127.0.0.1:8080
+./scripts/test.sh    # 272 checks
+./scripts/demo.sh    # the same requests, printed instead of served
 ```
 
-Both take `NIL_SDK` if the framework is not a sibling checkout.
+All three take `NIL_SDK` if the framework is not a sibling checkout, and
+`serve.sh` takes `NILWEB_PORT`.
 
-## There is no server in here yet
+It needs a framework with the socket, entropy and byte intrinsics — the commit
+"Sockets, secure random, and byte access to text" or later.
 
-The NIL runtime has no networking. Not "an unfinished API" — no network
-intrinsics at all. The runtime's intrinsic table covers files, paths,
-directories, databases, the environment, the console, regular expressions and
-GPU compute, and nothing that opens a socket. `nil.std.net` says so itself:
+## One connection at a time
 
-> Transport-independent HTTP protocol values. Network I/O is intentionally
-> absent from this active module until an HTTP provider is built and tested.
+There is a server, and it serves: bind, accept, read until the request is
+framed, hand the text to the application, write the answer, close, repeat.
 
-Sockets and an HTTP server exist as Ny designs under `nilstd/experimental/net`,
-and a `socket.linux.c` sits in `nilstd/native/net`, but nothing builds them and
-no `ml_net` library is produced. The NyWeb original did not have this problem
-because it sat on `nyhttp`, which has no NIL equivalent.
+It handles one connection at a time, and will until the language grows
+something to hand a connection to. There are no threads, no async, and no way
+to wait on several sockets at once — that last one is the piece that would have
+to arrive first. So this is a development server, a local tool, or something
+behind a reverse proxy that absorbs the slow clients. Every accepted
+connection gets a 15-second silence deadline, because a single-threaded loop
+without one is a single slow client away from serving nobody.
 
-So this framework is, for now, exactly what `nil.std.net` is: everything above
-the transport. `answer` in `src/main.matrix` takes a request as text and gives
-back a response as text. Whatever ends up accepting connections calls that.
+No keep-alive: a connection is answered and closed. No TLS. A request is capped
+at 1 MiB, header and body together, and the cap stops the reading rather than
+rejecting afterwards.
 
-Three ways to get a transport, in the order I would pick them:
+### This used to say the opposite
 
-1. **`net.*` intrinsics in the runtime.** How `file.*` already works, uses the
-   `socket.linux.c` that is already there, and unblocks the stdlib's own
-   pending HTTP provider rather than only this repo. Needs a change to
-   exec-nil-framework and a rebuild.
-2. **An Ny shim over a C library shipped here.** Matrix cannot declare FFI —
-   `note interop` is rejected with "a bodyless paragraph is an intrinsic-backed
-   declaration, which is not lowered yet" — but an Ny page can, and a Matrix
-   book can read that page. This is proven working: Matrix → Ny `@interop` →
-   `dlopen`, with text crossing in both directions.
-3. **Stay transport-independent** and let something else do the accepting.
+The first version of this framework had no server and this section explained
+why: the NIL runtime had no network intrinsics at all, `nil.std.net` was
+protocol values with a note saying the transport was deliberately absent, and
+the socket design under `nilstd/experimental` had nothing beneath it.
+
+That was a gap in the framework rather than a fact to design around, so it was
+filled in: `nil.std.net.socket` now exists, and so do
+`nil.std.security.random` and `nil.std.text`'s `byte_at`/`from_byte`, which
+closed the other two holes this framework had documented. See the framework's
+[socket reference](https://github.com/exec-software/exec-nil-framework/blob/master/docs/standard-library/sockets.md).
 
 ## Differences from NyWeb
 
@@ -77,9 +81,10 @@ table. A route names its handler with text and the application switches on the
 name. The cost is one `switch` per application; what it buys is a route table
 that is plain data — readable, testable and reorderable without running it.
 
-**The template engine will be Matrix, not C++.** NyWeb's was 626 lines of C++
-reached by FFI. Matrix can do the string work itself, and a template engine in
-the language it serves is one that can be read by the people using it.
+**The template engine is Matrix, not C++.** NyWeb's was 626 lines of C++
+reached by FFI. This one is Matrix, because Matrix can do the string work
+itself, and a template engine written in the language it serves is one the
+people using it can read.
 
 **Middleware is two lists, not a chain of wrapped calls.** The `next(request)`
 shape every other framework uses needs somewhere to capture `next`, and Matrix
@@ -98,31 +103,36 @@ a handler testable without a server.
 page reading five parameters parsed the query five times. Here a request is
 parsed at construction and read from arrays afterwards.
 
-## Sessions do not generate their own identifiers
+**It brought its own foundations.** NyWeb sat on `nyhttp`. There was no NIL
+equivalent and no socket to write one over, so rather than shipping a native
+shim inside this repository, the three things the framework was missing —
+sockets, secure random values, and reading a byte of text as a number — were
+added to the framework itself. Everything here is ordinary Matrix calling the
+ordinary standard library.
 
-A session id is a bearer credential: whoever holds one is the user. It has to
-come from a cryptographically secure source, and there is none reachable from
-Matrix today:
+## Sessions
 
-- `nil.std.math` is MINSTD, a 31-bit linear congruential generator whose global
-  stream starts at the seed 12345. Its own documentation says "neither API is
-  cryptographic". Two draws reveal the stream.
-- `nil.std.security` has base64 and hex. No hash, no HMAC, no random.
-- The runtime has no crypto or random intrinsic of any kind.
-- `/dev/urandom` cannot be read: `file.read_regular_bytes` refuses a character
-  device by design, and `file.read_bytes` returns empty for one.
+`new-session-id` draws sixteen bytes from `nil.std.security.random` — kernel
+entropy, no fallback to a weak source — and gives back thirty-two hex
+characters. `begin-session` does that and puts the session in the store in one
+step, which is what a sign-in handler wants.
 
-So `start-session` takes the id from its caller, and the caller is expected to
-get it from the same native shim that will be providing the socket —
-`getrandom(2)` is one more export on a library that has to exist anyway.
-`development-id` exists so the tests and the demo can run, is named so it
-cannot be reached for by accident, and documents exactly what it is not.
+It can fail, and says so rather than returning empty text. A machine whose
+kernel will not provide entropy does not get a session; the answer there is a
+500, not a guessable id. There is deliberately no fallback, because a
+predictable session id is worse than no session: the failure is invisible until
+someone is reading another user's pages.
 
-Everything else about sessions is the part that can be got right today and is:
-expiry, renewal on write, the store, and above all the cookie — `HttpOnly`,
-`SameSite=Lax`, `Path=/`, a `Max-Age` that matches the store, and `Secure` as
-the one thing left to the caller, because a `Secure` cookie is not sent over
-the plain HTTP that development runs on.
+This module used to refuse to generate an id at all, and shipped a
+`development-id` labelled in capitals as not a credential, because nothing
+cryptographically secure was reachable from Matrix. Both are gone — the
+workaround with the gap that caused it.
+
+The cookie is not configurable and that is the point: `HttpOnly` keeps the id
+out of `document.cookie`, `SameSite=Lax` keeps it off cross-site POSTs,
+`Path=/` scopes it, and `Max-Age` matches the store so the browser forgets when
+the server does. `Secure` is the one choice left to the caller, because a
+`Secure` cookie is not sent over the plain HTTP that development runs on.
 
 ## Templates read; they do not evaluate
 
@@ -136,24 +146,24 @@ It is a narrower contract and a sturdier one. A template can only read what a
 handler decided to publish, so it cannot reach into a session, open a file or
 call a service, and reviewing what a page can see is reading one paragraph.
 
-## A known limit in percent-encoding
+## Percent-coding is byte-exact
 
-`decode-component` is correct for all of Unicode: overlong encodings, surrogate
-halves, truncated sequences and four-byte planes are all handled, and ill-formed
-input becomes U+FFFD as the WHATWG standard requires.
+`decode-component` is correct for all of Unicode: overlong encodings,
+surrogate halves, truncated sequences and four-byte planes are all handled,
+and ill-formed input becomes U+FFFD as the WHATWG standard requires.
 
-`encode-component` is correct for ASCII and passes non-ASCII bytes through
-unescaped. Escaping one means reading its numeric value, and nothing reachable
-from Matrix can do that: `nil.std.text` slices by byte but has no byte-to-number
-conversion, and `nil.std.core`'s `char_to_i32` takes a whole Unicode scalar and
-**aborts the process** on a partial one — a fatal runtime error, not a fault
-that `attempt` can catch. So a byte of a multi-byte character cannot be
-inspected, and such a character cannot be isolated to inspect whole, because
-isolating it needs the same test.
+`encode-component` is correct too, which it was not at first. Escaping a
+non-ASCII byte means reading its value, and nothing reachable from Matrix
+could do that: `nil.std.text` sliced by byte but had no byte-to-number
+conversion, and `nil.std.core`'s `char_to_i32` takes a whole Unicode scalar
+and *aborts the process* on a partial one — a fatal runtime error, not a fault
+`attempt` can catch. The first version passed non-ASCII through unescaped and
+said so here.
 
-A `byte_at` in `nil.std.text` would close this in an afternoon. It is tracked
-here rather than worked around, because every workaround available is wrong in
-a way that only shows up on someone's name.
+`nil.std.text` now has `byte_at` and `from_byte`, so this walks bytes and
+escapes each one the grammar does not permit, which is what RFC 3986 actually
+specifies: `café` encodes as `caf%C3%A9`, the euro sign as three escapes, an
+emoji as four.
 
 ## Layout
 
@@ -171,6 +181,7 @@ src/nilweb/template/render.matrix    the .nilhtml engine
 src/nilweb/session/session.matrix    sessions and their cookie
 src/nilweb/static/files.matrix       serving a directory
 src/nilweb/middleware/chain.matrix   guards and finishers
+src/nilweb/server/listener.matrix    binding, accepting, request framing
 src/main.matrix                      a demonstration, and the `answer` entry point
 web/                                 the demonstration's templates and assets
 tests/run-tests.matrix               every suite

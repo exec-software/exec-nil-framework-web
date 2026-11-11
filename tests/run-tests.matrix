@@ -19,6 +19,7 @@ read everything from nilweb.template.render
 read everything from nilweb.session.session
 read everything from nilweb.static.files
 read everything from nilweb.middleware.chain
+read everything from nilweb.server.listener
 
 scan-tests returns nothing begin paragraph
     evaluate section with title being "nilweb.text.scan"
@@ -157,8 +158,18 @@ uri-tests returns nothing begin paragraph
         actual being (decode-component with raw being "%C0%AF"), expected being (nil.std.core::Convert.i32_to_char with code being 65533) plus (nil.std.core::Convert.i32_to_char with code being 65533)
     evaluate same-text with label being "a surrogate half is rejected",
         actual being (decode-component with raw being "%ED%A0%80"), expected being (nil.std.core::Convert.i32_to_char with code being 65533) plus (nil.std.core::Convert.i32_to_char with code being 65533) plus (nil.std.core::Convert.i32_to_char with code being 65533)
-    evaluate same-text with label being "non-ASCII passes through encoding unescaped, as documented",
-        actual being (encode-component with raw being (nil.std.core::Convert.i32_to_char with code being 233)), expected being (nil.std.core::Convert.i32_to_char with code being 233)
+    evaluate same-text with label being "a non-ASCII character encodes as its UTF-8 bytes",
+        actual being (encode-component with raw being (nil.std.core::Convert.i32_to_char with code being 233)), expected being "%C3%A9"
+    evaluate same-text with label being "a three-byte character encodes as three escapes",
+        actual being (encode-component with raw being (nil.std.core::Convert.i32_to_char with code being 8364)), expected being "%E2%82%AC"
+    evaluate same-text with label being "a four-byte character encodes as four escapes",
+        actual being (encode-component with raw being (nil.std.core::Convert.i32_to_char with code being 128161)), expected being "%F0%9F%92%A1"
+    evaluate same-text with label being "non-ASCII round-trips through encode and decode",
+        actual being (decode-component with raw being (encode-component with raw being
+            "caf" plus (nil.std.core::Convert.i32_to_char with code being 233))),
+        expected being "caf" plus (nil.std.core::Convert.i32_to_char with code being 233)
+    evaluate same-text with label being "a mixed name encodes only what must be escaped",
+        actual being (encode-component with raw being "Ada Lovelace"), expected being "Ada%20Lovelace"
     evaluate same-text with label being "lower case hex decodes too",
         actual being (decode-component with raw being "a%2fb"), expected being "a/b"
     evaluate same-text with label being "a stray percent is kept, not dropped",
@@ -514,7 +525,13 @@ session-tests returns nothing begin paragraph
     variable store is new-store with nothing
     set store to store-with-lifetime with store being store, lifetime being 60000
 
-    value id is development-id with now-at being start-time
+    value drawn is new-session-id with nothing
+    evaluate is-true with label being "a session id is available from the kernel", actual being drawn.available
+    evaluate same-number with label being "a session id is sixteen bytes of hex",
+        actual being (nil.std.text::length with s being drawn.id), expected being 32
+    evaluate is-true with label being "two session ids differ",
+        actual being not (drawn.id equals (new-session-id with nothing).id)
+    value id is drawn.id
     set store to start-session with store being store, id being id, now-at being start-time
     evaluate is-true with label being "a started session is live",
         actual being (has-session with store being store, id being id, now-at being start-time)
@@ -551,9 +568,8 @@ session-tests returns nothing begin paragraph
     !!! A short lifetime, so the session started at time 1 is already past it
     !!! when the sweep runs. With the default hour both would still be live.
     variable second-store is store-with-lifetime with store being (new-store with nothing), lifetime being 1000
-    value kept is development-id with now-at being start-time
-    value dropped is development-id with now-at being start-time
-    evaluate is-true with label being "two development ids differ within one run", actual being not (kept equals dropped)
+    value kept is (new-session-id with nothing).id
+    value dropped is (new-session-id with nothing).id
     set second-store to start-session with store being second-store, id being kept, now-at being start-time
     set second-store to start-session with store being second-store, id being dropped, now-at being 1
     evaluate same-number with label being "sweeping drops only what expired",
@@ -589,6 +605,17 @@ session-tests returns nothing begin paragraph
             content being (cookie-name with nothing) plus "=xyz789"), body being ""
     evaluate same-text with label being "the session id is read off the request",
         actual being (session-id-of with request being carrying), expected being "xyz789"
+
+    !!! begin-session is what a sign-in handler calls: a fresh id and a store
+    !!! that holds it, or a refusal that must not be treated as a session.
+    value opened-session is begin-session with store being (new-store with nothing), now-at being start-time
+    evaluate is-true with label being "begin-session succeeds", actual being opened-session.available
+    evaluate same-number with label being "begin-session draws a full-length id",
+        actual being (nil.std.text::length with s being opened-session.id), expected being 32
+    evaluate is-true with label being "begin-session put the session in the store",
+        actual being (has-session with store being opened-session.store, id being opened-session.id, now-at being start-time)
+    evaluate same-number with label being "begin-session created exactly one session",
+        actual being (live-count with store being opened-session.store, now-at being start-time), expected being 1
     give nothing
 end paragraph
 
@@ -707,6 +734,67 @@ middleware-tests returns nothing begin paragraph
     give nothing
 end paragraph
 
+listener-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.server.listener"
+    !!! The framing decision, tested without a socket: how the loop knows a
+    !!! request has fully arrived. Getting this wrong means either answering
+    !!! half a request or waiting forever for a body that was never coming.
+    value marker is (crlf with nothing) plus (crlf with nothing)
+    evaluate is-true with label being "a bodyless request ends at the blank line",
+        actual being (request-is-complete with message being "GET / HTTP/1.1" plus (crlf with nothing)
+            plus "Host: x" plus marker)
+    evaluate is-true with label being "a header section with no blank line is incomplete",
+        actual being not (request-is-complete with message being "GET / HTTP/1.1" plus (crlf with nothing) plus "Host: x")
+    evaluate is-true with label being "nothing at all is incomplete",
+        actual being not (request-is-complete with message being "")
+    evaluate is-true with label being "a bare-LF request is recognised",
+        actual being (request-is-complete with message being "GET / HTTP/1.1" plus newline plus "Host: x"
+            plus newline plus newline)
+
+    value header-part is "POST /f HTTP/1.1" plus (crlf with nothing) plus "Content-Length: 9" plus marker
+    evaluate is-true with label being "a declared body that has not arrived is incomplete",
+        actual being not (request-is-complete with message being header-part plus "short")
+    evaluate is-true with label being "a declared body that has arrived is complete",
+        actual being (request-is-complete with message being header-part plus "123456789")
+    evaluate is-true with label being "more body than declared is complete",
+        actual being (request-is-complete with message being header-part plus "123456789extra")
+    evaluate is-true with label being "Content-Length folds case like any field",
+        actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
+            plus "content-length: 2" plus marker plus "ab")
+    evaluate is-true with label being "a Content-Length that is not a number does not stall the loop",
+        actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
+            plus "Content-Length: banana" plus marker)
+    evaluate is-true with label being "a negative Content-Length does not stall the loop",
+        actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
+            plus "Content-Length: -5" plus marker)
+    evaluate is-true with label being "an absurd Content-Length does not stall the loop",
+        actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
+            plus "Content-Length: 99999999999999999999" plus marker)
+
+    evaluate same-text with label being "the startup line names a loopback address",
+        actual being (address-text with host being "127.0.0.1", port being 8080), expected being "http://127.0.0.1:8080/"
+    evaluate same-text with label being "an empty host is shown as every interface",
+        actual being (address-text with host being "", port being 80), expected being "http://0.0.0.0:80/"
+
+    !!! Binding is refused rather than raised, and the refusal says why. Port
+    !!! zero is rejected by the intrinsic, so this needs no free port.
+    value refused is bind-server with host being "127.0.0.1", port being 0
+    evaluate is-true with label being "an impossible port does not bind", actual being not refused.listening
+    evaluate is-true with label being "a refusal to bind says why", actual being not (refused.complaint equals "")
+    value named is bind-server with host being "example.com", port being 8080
+    evaluate is-true with label being "binding does not resolve a name", actual being not named.listening
+
+    !!! A real bind, so the happy path is covered too, then released.
+    value bound is bind-server with host being "127.0.0.1", port being 18731
+    evaluate is-true with label being "a free loopback port binds", actual being bound.listening
+    evaluate same-text with label being "a successful bind has no complaint", actual being bound.complaint, expected being ""
+    evaluate stop-server with server being bound
+    value again-bound is bind-server with host being "127.0.0.1", port being 18731
+    evaluate is-true with label being "the port is free again after stopping", actual being again-bound.listening
+    evaluate stop-server with server being again-bound
+    give nothing
+end paragraph
+
 main returns number begin paragraph
     say "nilweb tests"
     evaluate scan-tests with nothing
@@ -721,5 +809,6 @@ main returns number begin paragraph
     evaluate session-tests with nothing
     evaluate static-tests with nothing
     evaluate middleware-tests with nothing
+    evaluate listener-tests with nothing
     give verdict with nothing
 end paragraph
