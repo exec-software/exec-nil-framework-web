@@ -20,6 +20,8 @@ read everything from nilweb.session.session
 read everything from nilweb.static.files
 read everything from nilweb.middleware.chain
 read everything from nilweb.server.engine
+read everything from nilweb.time.clock
+read everything from nilweb.log.access
 
 scan-tests returns nothing begin paragraph
     evaluate section with title being "nilweb.text.scan"
@@ -984,6 +986,411 @@ listener-tests returns nothing begin paragraph
     give nothing
 end paragraph
 
+clock-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.time.clock"
+    !!! Every expectation below was generated from a calendar implementation
+    !!! that is not this one, over leap days, century non-leap years, the
+    !!! RFC's own example instant, and forty random instants. Calendar code
+    !!! that is wrong one day in four years looks right in every test someone
+    !!! writes in the other three, so the cases are chosen rather than typed.
+    evaluate same-text with label being "http 0", actual being (http-date with at-ms being 0), expected being "Thu, 01 Jan 1970 00:00:00 GMT"
+    evaluate same-text with label being "iso 0", actual being (iso-instant with at-ms being 0), expected being "1970-01-01T00:00:00Z"
+    evaluate same-text with label being "log 0", actual being (log-date with at-ms being 0), expected being "01/Jan/1970:00:00:00 +0000"
+    evaluate same-number with label being "weekday 0", actual being (civil-from-ms with at-ms being 0).weekday, expected being 4
+    evaluate same-number with label being "round-trip 0", actual being (ms-from-http-date with stated being "Thu, 01 Jan 1970 00:00:00 GMT"), expected being 0
+    evaluate same-text with label being "http 1", actual being (http-date with at-ms being 1), expected being "Thu, 01 Jan 1970 00:00:00 GMT"
+    evaluate same-text with label being "iso 1", actual being (iso-instant with at-ms being 1), expected being "1970-01-01T00:00:00Z"
+    evaluate same-text with label being "log 1", actual being (log-date with at-ms being 1), expected being "01/Jan/1970:00:00:00 +0000"
+    evaluate same-number with label being "weekday 1", actual being (civil-from-ms with at-ms being 1).weekday, expected being 4
+    evaluate same-number with label being "round-trip 1", actual being (ms-from-http-date with stated being "Thu, 01 Jan 1970 00:00:00 GMT"), expected being 0
+    evaluate same-text with label being "http 999", actual being (http-date with at-ms being 999), expected being "Thu, 01 Jan 1970 00:00:00 GMT"
+    evaluate same-text with label being "iso 999", actual being (iso-instant with at-ms being 999), expected being "1970-01-01T00:00:00Z"
+    evaluate same-text with label being "log 999", actual being (log-date with at-ms being 999), expected being "01/Jan/1970:00:00:00 +0000"
+    evaluate same-number with label being "weekday 999", actual being (civil-from-ms with at-ms being 999).weekday, expected being 4
+    evaluate same-number with label being "round-trip 999", actual being (ms-from-http-date with stated being "Thu, 01 Jan 1970 00:00:00 GMT"), expected being 0
+    evaluate same-text with label being "http 1000", actual being (http-date with at-ms being 1000), expected being "Thu, 01 Jan 1970 00:00:01 GMT"
+    evaluate same-text with label being "iso 1000", actual being (iso-instant with at-ms being 1000), expected being "1970-01-01T00:00:01Z"
+    evaluate same-text with label being "log 1000", actual being (log-date with at-ms being 1000), expected being "01/Jan/1970:00:00:01 +0000"
+    evaluate same-number with label being "weekday 1000", actual being (civil-from-ms with at-ms being 1000).weekday, expected being 4
+    evaluate same-number with label being "round-trip 1000", actual being (ms-from-http-date with stated being "Thu, 01 Jan 1970 00:00:01 GMT"), expected being 1000
+    evaluate same-text with label being "http 784111777000", actual being (http-date with at-ms being 784111777000), expected being "Sun, 06 Nov 1994 08:49:37 GMT"
+    evaluate same-text with label being "iso 784111777000", actual being (iso-instant with at-ms being 784111777000), expected being "1994-11-06T08:49:37Z"
+    evaluate same-text with label being "log 784111777000", actual being (log-date with at-ms being 784111777000), expected being "06/Nov/1994:08:49:37 +0000"
+    evaluate same-number with label being "weekday 784111777000", actual being (civil-from-ms with at-ms being 784111777000).weekday, expected being 0
+    evaluate same-number with label being "round-trip 784111777000", actual being (ms-from-http-date with stated being "Sun, 06 Nov 1994 08:49:37 GMT"), expected being 784111777000
+    evaluate same-text with label being "http 951782400000", actual being (http-date with at-ms being 951782400000), expected being "Tue, 29 Feb 2000 00:00:00 GMT"
+    evaluate same-text with label being "iso 951782400000", actual being (iso-instant with at-ms being 951782400000), expected being "2000-02-29T00:00:00Z"
+    evaluate same-text with label being "log 951782400000", actual being (log-date with at-ms being 951782400000), expected being "29/Feb/2000:00:00:00 +0000"
+    evaluate same-number with label being "weekday 951782400000", actual being (civil-from-ms with at-ms being 951782400000).weekday, expected being 2
+    evaluate same-number with label being "round-trip 951782400000", actual being (ms-from-http-date with stated being "Tue, 29 Feb 2000 00:00:00 GMT"), expected being 951782400000
+    evaluate same-text with label being "http 1583020800000", actual being (http-date with at-ms being 1583020800000), expected being "Sun, 01 Mar 2020 00:00:00 GMT"
+    evaluate same-text with label being "iso 1583020800000", actual being (iso-instant with at-ms being 1583020800000), expected being "2020-03-01T00:00:00Z"
+    evaluate same-text with label being "log 1583020800000", actual being (log-date with at-ms being 1583020800000), expected being "01/Mar/2020:00:00:00 +0000"
+    evaluate same-number with label being "weekday 1583020800000", actual being (civil-from-ms with at-ms being 1583020800000).weekday, expected being 0
+    evaluate same-number with label being "round-trip 1583020800000", actual being (ms-from-http-date with stated being "Sun, 01 Mar 2020 00:00:00 GMT"), expected being 1583020800000
+    evaluate same-text with label being "http 4107542400000", actual being (http-date with at-ms being 4107542400000), expected being "Mon, 01 Mar 2100 00:00:00 GMT"
+    evaluate same-text with label being "iso 4107542400000", actual being (iso-instant with at-ms being 4107542400000), expected being "2100-03-01T00:00:00Z"
+    evaluate same-text with label being "log 4107542400000", actual being (log-date with at-ms being 4107542400000), expected being "01/Mar/2100:00:00:00 +0000"
+    evaluate same-number with label being "weekday 4107542400000", actual being (civil-from-ms with at-ms being 4107542400000).weekday, expected being 1
+    evaluate same-number with label being "round-trip 4107542400000", actual being (ms-from-http-date with stated being "Mon, 01 Mar 2100 00:00:00 GMT"), expected being 4107542400000
+    evaluate same-text with label being "http 4102444800000", actual being (http-date with at-ms being 4102444800000), expected being "Fri, 01 Jan 2100 00:00:00 GMT"
+    evaluate same-text with label being "iso 4102444800000", actual being (iso-instant with at-ms being 4102444800000), expected being "2100-01-01T00:00:00Z"
+    evaluate same-text with label being "log 4102444800000", actual being (log-date with at-ms being 4102444800000), expected being "01/Jan/2100:00:00:00 +0000"
+    evaluate same-number with label being "weekday 4102444800000", actual being (civil-from-ms with at-ms being 4102444800000).weekday, expected being 5
+    evaluate same-number with label being "round-trip 4102444800000", actual being (ms-from-http-date with stated being "Fri, 01 Jan 2100 00:00:00 GMT"), expected being 4102444800000
+    evaluate same-text with label being "http 1709164800000", actual being (http-date with at-ms being 1709164800000), expected being "Thu, 29 Feb 2024 00:00:00 GMT"
+    evaluate same-text with label being "iso 1709164800000", actual being (iso-instant with at-ms being 1709164800000), expected being "2024-02-29T00:00:00Z"
+    evaluate same-text with label being "log 1709164800000", actual being (log-date with at-ms being 1709164800000), expected being "29/Feb/2024:00:00:00 +0000"
+    evaluate same-number with label being "weekday 1709164800000", actual being (civil-from-ms with at-ms being 1709164800000).weekday, expected being 4
+    evaluate same-number with label being "round-trip 1709164800000", actual being (ms-from-http-date with stated being "Thu, 29 Feb 2024 00:00:00 GMT"), expected being 1709164800000
+    evaluate same-text with label being "http 2524608000000", actual being (http-date with at-ms being 2524608000000), expected being "Sat, 01 Jan 2050 00:00:00 GMT"
+    evaluate same-text with label being "iso 2524608000000", actual being (iso-instant with at-ms being 2524608000000), expected being "2050-01-01T00:00:00Z"
+    evaluate same-text with label being "log 2524608000000", actual being (log-date with at-ms being 2524608000000), expected being "01/Jan/2050:00:00:00 +0000"
+    evaluate same-number with label being "weekday 2524608000000", actual being (civil-from-ms with at-ms being 2524608000000).weekday, expected being 6
+    evaluate same-number with label being "round-trip 2524608000000", actual being (ms-from-http-date with stated being "Sat, 01 Jan 2050 00:00:00 GMT"), expected being 2524608000000
+    evaluate same-text with label being "http 253402300799000", actual being (http-date with at-ms being 253402300799000), expected being "Fri, 31 Dec 9999 23:59:59 GMT"
+    evaluate same-text with label being "iso 253402300799000", actual being (iso-instant with at-ms being 253402300799000), expected being "9999-12-31T23:59:59Z"
+    evaluate same-text with label being "log 253402300799000", actual being (log-date with at-ms being 253402300799000), expected being "31/Dec/9999:23:59:59 +0000"
+    evaluate same-number with label being "weekday 253402300799000", actual being (civil-from-ms with at-ms being 253402300799000).weekday, expected being 5
+    evaluate same-number with label being "round-trip 253402300799000", actual being (ms-from-http-date with stated being "Fri, 31 Dec 9999 23:59:59 GMT"), expected being 253402300799000
+    evaluate same-text with label being "http 1735814679863", actual being (http-date with at-ms being 1735814679863), expected being "Thu, 02 Jan 2025 10:44:39 GMT"
+    evaluate same-text with label being "iso 1735814679863", actual being (iso-instant with at-ms being 1735814679863), expected being "2025-01-02T10:44:39Z"
+    evaluate same-text with label being "log 1735814679863", actual being (log-date with at-ms being 1735814679863), expected being "02/Jan/2025:10:44:39 +0000"
+    evaluate same-number with label being "weekday 1735814679863", actual being (civil-from-ms with at-ms being 1735814679863).weekday, expected being 4
+    evaluate same-number with label being "round-trip 1735814679863", actual being (ms-from-http-date with stated being "Thu, 02 Jan 2025 10:44:39 GMT"), expected being 1735814679000
+    evaluate same-text with label being "http 213249139792", actual being (http-date with at-ms being 213249139792), expected being "Mon, 04 Oct 1976 03:52:19 GMT"
+    evaluate same-text with label being "iso 213249139792", actual being (iso-instant with at-ms being 213249139792), expected being "1976-10-04T03:52:19Z"
+    evaluate same-text with label being "log 213249139792", actual being (log-date with at-ms being 213249139792), expected being "04/Oct/1976:03:52:19 +0000"
+    evaluate same-number with label being "weekday 213249139792", actual being (civil-from-ms with at-ms being 213249139792).weekday, expected being 1
+    evaluate same-number with label being "round-trip 213249139792", actual being (ms-from-http-date with stated being "Mon, 04 Oct 1976 03:52:19 GMT"), expected being 213249139000
+    evaluate same-text with label being "http 3608083640115", actual being (http-date with at-ms being 3608083640115), expected being "Tue, 02 May 2084 05:27:20 GMT"
+    evaluate same-text with label being "iso 3608083640115", actual being (iso-instant with at-ms being 3608083640115), expected being "2084-05-02T05:27:20Z"
+    evaluate same-text with label being "log 3608083640115", actual being (log-date with at-ms being 3608083640115), expected being "02/May/2084:05:27:20 +0000"
+    evaluate same-number with label being "weekday 3608083640115", actual being (civil-from-ms with at-ms being 3608083640115).weekday, expected being 2
+    evaluate same-number with label being "round-trip 3608083640115", actual being (ms-from-http-date with stated being "Tue, 02 May 2084 05:27:20 GMT"), expected being 3608083640000
+    evaluate same-text with label being "http 414618456107", actual being (http-date with at-ms being 414618456107), expected being "Sun, 20 Feb 1983 19:47:36 GMT"
+    evaluate same-text with label being "iso 414618456107", actual being (iso-instant with at-ms being 414618456107), expected being "1983-02-20T19:47:36Z"
+    evaluate same-text with label being "log 414618456107", actual being (log-date with at-ms being 414618456107), expected being "20/Feb/1983:19:47:36 +0000"
+    evaluate same-number with label being "weekday 414618456107", actual being (civil-from-ms with at-ms being 414618456107).weekday, expected being 0
+    evaluate same-number with label being "round-trip 414618456107", actual being (ms-from-http-date with stated being "Sun, 20 Feb 1983 19:47:36 GMT"), expected being 414618456000
+    evaluate same-text with label being "http 2561371130360", actual being (http-date with at-ms being 2561371130360), expected being "Thu, 02 Mar 2051 11:58:50 GMT"
+    evaluate same-text with label being "iso 2561371130360", actual being (iso-instant with at-ms being 2561371130360), expected being "2051-03-02T11:58:50Z"
+    evaluate same-text with label being "log 2561371130360", actual being (log-date with at-ms being 2561371130360), expected being "02/Mar/2051:11:58:50 +0000"
+    evaluate same-number with label being "weekday 2561371130360", actual being (civil-from-ms with at-ms being 2561371130360).weekday, expected being 4
+    evaluate same-number with label being "round-trip 2561371130360", actual being (ms-from-http-date with stated being "Thu, 02 Mar 2051 11:58:50 GMT"), expected being 2561371130000
+    evaluate same-text with label being "http 3998863656053", actual being (http-date with at-ms being 3998863656053), expected being "Wed, 19 Sep 2096 03:27:36 GMT"
+    evaluate same-text with label being "iso 3998863656053", actual being (iso-instant with at-ms being 3998863656053), expected being "2096-09-19T03:27:36Z"
+    evaluate same-text with label being "log 3998863656053", actual being (log-date with at-ms being 3998863656053), expected being "19/Sep/2096:03:27:36 +0000"
+    evaluate same-number with label being "weekday 3998863656053", actual being (civil-from-ms with at-ms being 3998863656053).weekday, expected being 3
+    evaluate same-number with label being "round-trip 3998863656053", actual being (ms-from-http-date with stated being "Wed, 19 Sep 2096 03:27:36 GMT"), expected being 3998863656000
+    evaluate same-text with label being "http 942777257717", actual being (http-date with at-ms being 942777257717), expected being "Tue, 16 Nov 1999 18:34:17 GMT"
+    evaluate same-text with label being "iso 942777257717", actual being (iso-instant with at-ms being 942777257717), expected being "1999-11-16T18:34:17Z"
+    evaluate same-text with label being "log 942777257717", actual being (log-date with at-ms being 942777257717), expected being "16/Nov/1999:18:34:17 +0000"
+    evaluate same-number with label being "weekday 942777257717", actual being (civil-from-ms with at-ms being 942777257717).weekday, expected being 2
+    evaluate same-number with label being "round-trip 942777257717", actual being (ms-from-http-date with stated being "Tue, 16 Nov 1999 18:34:17 GMT"), expected being 942777257000
+    evaluate same-text with label being "http 378118164696", actual being (http-date with at-ms being 378118164696), expected being "Fri, 25 Dec 1981 08:49:24 GMT"
+    evaluate same-text with label being "iso 378118164696", actual being (iso-instant with at-ms being 378118164696), expected being "1981-12-25T08:49:24Z"
+    evaluate same-text with label being "log 378118164696", actual being (log-date with at-ms being 378118164696), expected being "25/Dec/1981:08:49:24 +0000"
+    evaluate same-number with label being "weekday 378118164696", actual being (civil-from-ms with at-ms being 378118164696).weekday, expected being 5
+    evaluate same-number with label being "round-trip 378118164696", actual being (ms-from-http-date with stated being "Fri, 25 Dec 1981 08:49:24 GMT"), expected being 378118164000
+    evaluate same-text with label being "http 1840108496730", actual being (http-date with at-ms being 1840108496730), expected being "Sun, 23 Apr 2028 13:14:56 GMT"
+    evaluate same-text with label being "iso 1840108496730", actual being (iso-instant with at-ms being 1840108496730), expected being "2028-04-23T13:14:56Z"
+    evaluate same-text with label being "log 1840108496730", actual being (log-date with at-ms being 1840108496730), expected being "23/Apr/2028:13:14:56 +0000"
+    evaluate same-number with label being "weekday 1840108496730", actual being (civil-from-ms with at-ms being 1840108496730).weekday, expected being 0
+    evaluate same-number with label being "round-trip 1840108496730", actual being (ms-from-http-date with stated being "Sun, 23 Apr 2028 13:14:56 GMT"), expected being 1840108496000
+    evaluate same-text with label being "http 1056861981583", actual being (http-date with at-ms being 1056861981583), expected being "Sun, 29 Jun 2003 04:46:21 GMT"
+    evaluate same-text with label being "iso 1056861981583", actual being (iso-instant with at-ms being 1056861981583), expected being "2003-06-29T04:46:21Z"
+    evaluate same-text with label being "log 1056861981583", actual being (log-date with at-ms being 1056861981583), expected being "29/Jun/2003:04:46:21 +0000"
+    evaluate same-number with label being "weekday 1056861981583", actual being (civil-from-ms with at-ms being 1056861981583).weekday, expected being 0
+    evaluate same-number with label being "round-trip 1056861981583", actual being (ms-from-http-date with stated being "Sun, 29 Jun 2003 04:46:21 GMT"), expected being 1056861981000
+    evaluate same-text with label being "http 2422751164377", actual being (http-date with at-ms being 2422751164377), expected being "Wed, 10 Oct 2046 02:26:04 GMT"
+    evaluate same-text with label being "iso 2422751164377", actual being (iso-instant with at-ms being 2422751164377), expected being "2046-10-10T02:26:04Z"
+    evaluate same-text with label being "log 2422751164377", actual being (log-date with at-ms being 2422751164377), expected being "10/Oct/2046:02:26:04 +0000"
+    evaluate same-number with label being "weekday 2422751164377", actual being (civil-from-ms with at-ms being 2422751164377).weekday, expected being 3
+    evaluate same-number with label being "round-trip 2422751164377", actual being (ms-from-http-date with stated being "Wed, 10 Oct 2046 02:26:04 GMT"), expected being 2422751164000
+    evaluate same-text with label being "http 259521333798", actual being (http-date with at-ms being 259521333798), expected being "Thu, 23 Mar 1978 17:15:33 GMT"
+    evaluate same-text with label being "iso 259521333798", actual being (iso-instant with at-ms being 259521333798), expected being "1978-03-23T17:15:33Z"
+    evaluate same-text with label being "log 259521333798", actual being (log-date with at-ms being 259521333798), expected being "23/Mar/1978:17:15:33 +0000"
+    evaluate same-number with label being "weekday 259521333798", actual being (civil-from-ms with at-ms being 259521333798).weekday, expected being 4
+    evaluate same-number with label being "round-trip 259521333798", actual being (ms-from-http-date with stated being "Thu, 23 Mar 1978 17:15:33 GMT"), expected being 259521333000
+    evaluate same-text with label being "http 2490337367215", actual being (http-date with at-ms being 2490337367215), expected being "Mon, 30 Nov 2048 08:22:47 GMT"
+    evaluate same-text with label being "iso 2490337367215", actual being (iso-instant with at-ms being 2490337367215), expected being "2048-11-30T08:22:47Z"
+    evaluate same-text with label being "log 2490337367215", actual being (log-date with at-ms being 2490337367215), expected being "30/Nov/2048:08:22:47 +0000"
+    evaluate same-number with label being "weekday 2490337367215", actual being (civil-from-ms with at-ms being 2490337367215).weekday, expected being 1
+    evaluate same-number with label being "round-trip 2490337367215", actual being (ms-from-http-date with stated being "Mon, 30 Nov 2048 08:22:47 GMT"), expected being 2490337367000
+    evaluate same-text with label being "http 2771212709977", actual being (http-date with at-ms being 2771212709977), expected being "Thu, 25 Oct 2057 05:18:29 GMT"
+    evaluate same-text with label being "iso 2771212709977", actual being (iso-instant with at-ms being 2771212709977), expected being "2057-10-25T05:18:29Z"
+    evaluate same-text with label being "log 2771212709977", actual being (log-date with at-ms being 2771212709977), expected being "25/Oct/2057:05:18:29 +0000"
+    evaluate same-number with label being "weekday 2771212709977", actual being (civil-from-ms with at-ms being 2771212709977).weekday, expected being 4
+    evaluate same-number with label being "round-trip 2771212709977", actual being (ms-from-http-date with stated being "Thu, 25 Oct 2057 05:18:29 GMT"), expected being 2771212709000
+    evaluate same-text with label being "http 2562495313589", actual being (http-date with at-ms being 2562495313589), expected being "Wed, 15 Mar 2051 12:15:13 GMT"
+    evaluate same-text with label being "iso 2562495313589", actual being (iso-instant with at-ms being 2562495313589), expected being "2051-03-15T12:15:13Z"
+    evaluate same-text with label being "log 2562495313589", actual being (log-date with at-ms being 2562495313589), expected being "15/Mar/2051:12:15:13 +0000"
+    evaluate same-number with label being "weekday 2562495313589", actual being (civil-from-ms with at-ms being 2562495313589).weekday, expected being 3
+    evaluate same-number with label being "round-trip 2562495313589", actual being (ms-from-http-date with stated being "Wed, 15 Mar 2051 12:15:13 GMT"), expected being 2562495313000
+    evaluate same-text with label being "http 274653318569", actual being (http-date with at-ms being 274653318569), expected being "Thu, 14 Sep 1978 20:35:18 GMT"
+    evaluate same-text with label being "iso 274653318569", actual being (iso-instant with at-ms being 274653318569), expected being "1978-09-14T20:35:18Z"
+    evaluate same-text with label being "log 274653318569", actual being (log-date with at-ms being 274653318569), expected being "14/Sep/1978:20:35:18 +0000"
+    evaluate same-number with label being "weekday 274653318569", actual being (civil-from-ms with at-ms being 274653318569).weekday, expected being 4
+    evaluate same-number with label being "round-trip 274653318569", actual being (ms-from-http-date with stated being "Thu, 14 Sep 1978 20:35:18 GMT"), expected being 274653318000
+    evaluate same-text with label being "http 2575164048591", actual being (http-date with at-ms being 2575164048591), expected being "Wed, 09 Aug 2051 03:20:48 GMT"
+    evaluate same-text with label being "iso 2575164048591", actual being (iso-instant with at-ms being 2575164048591), expected being "2051-08-09T03:20:48Z"
+    evaluate same-text with label being "log 2575164048591", actual being (log-date with at-ms being 2575164048591), expected being "09/Aug/2051:03:20:48 +0000"
+    evaluate same-number with label being "weekday 2575164048591", actual being (civil-from-ms with at-ms being 2575164048591).weekday, expected being 3
+    evaluate same-number with label being "round-trip 2575164048591", actual being (ms-from-http-date with stated being "Wed, 09 Aug 2051 03:20:48 GMT"), expected being 2575164048000
+    evaluate same-text with label being "http 216452094484", actual being (http-date with at-ms being 216452094484), expected being "Wed, 10 Nov 1976 05:34:54 GMT"
+    evaluate same-text with label being "iso 216452094484", actual being (iso-instant with at-ms being 216452094484), expected being "1976-11-10T05:34:54Z"
+    evaluate same-text with label being "log 216452094484", actual being (log-date with at-ms being 216452094484), expected being "10/Nov/1976:05:34:54 +0000"
+    evaluate same-number with label being "weekday 216452094484", actual being (civil-from-ms with at-ms being 216452094484).weekday, expected being 3
+    evaluate same-number with label being "round-trip 216452094484", actual being (ms-from-http-date with stated being "Wed, 10 Nov 1976 05:34:54 GMT"), expected being 216452094000
+    evaluate same-text with label being "http 974855592652", actual being (http-date with at-ms being 974855592652), expected being "Wed, 22 Nov 2000 01:13:12 GMT"
+    evaluate same-text with label being "iso 974855592652", actual being (iso-instant with at-ms being 974855592652), expected being "2000-11-22T01:13:12Z"
+    evaluate same-text with label being "log 974855592652", actual being (log-date with at-ms being 974855592652), expected being "22/Nov/2000:01:13:12 +0000"
+    evaluate same-number with label being "weekday 974855592652", actual being (civil-from-ms with at-ms being 974855592652).weekday, expected being 3
+    evaluate same-number with label being "round-trip 974855592652", actual being (ms-from-http-date with stated being "Wed, 22 Nov 2000 01:13:12 GMT"), expected being 974855592000
+    evaluate same-text with label being "http 2448331429808", actual being (http-date with at-ms being 2448331429808), expected being "Fri, 02 Aug 2047 04:03:49 GMT"
+    evaluate same-text with label being "iso 2448331429808", actual being (iso-instant with at-ms being 2448331429808), expected being "2047-08-02T04:03:49Z"
+    evaluate same-text with label being "log 2448331429808", actual being (log-date with at-ms being 2448331429808), expected being "02/Aug/2047:04:03:49 +0000"
+    evaluate same-number with label being "weekday 2448331429808", actual being (civil-from-ms with at-ms being 2448331429808).weekday, expected being 5
+    evaluate same-number with label being "round-trip 2448331429808", actual being (ms-from-http-date with stated being "Fri, 02 Aug 2047 04:03:49 GMT"), expected being 2448331429000
+    evaluate same-text with label being "http 587802646219", actual being (http-date with at-ms being 587802646219), expected being "Wed, 17 Aug 1988 06:30:46 GMT"
+    evaluate same-text with label being "iso 587802646219", actual being (iso-instant with at-ms being 587802646219), expected being "1988-08-17T06:30:46Z"
+    evaluate same-text with label being "log 587802646219", actual being (log-date with at-ms being 587802646219), expected being "17/Aug/1988:06:30:46 +0000"
+    evaluate same-number with label being "weekday 587802646219", actual being (civil-from-ms with at-ms being 587802646219).weekday, expected being 3
+    evaluate same-number with label being "round-trip 587802646219", actual being (ms-from-http-date with stated being "Wed, 17 Aug 1988 06:30:46 GMT"), expected being 587802646000
+    evaluate same-text with label being "http 1843784832406", actual being (http-date with at-ms being 1843784832406), expected being "Mon, 05 Jun 2028 02:27:12 GMT"
+    evaluate same-text with label being "iso 1843784832406", actual being (iso-instant with at-ms being 1843784832406), expected being "2028-06-05T02:27:12Z"
+    evaluate same-text with label being "log 1843784832406", actual being (log-date with at-ms being 1843784832406), expected being "05/Jun/2028:02:27:12 +0000"
+    evaluate same-number with label being "weekday 1843784832406", actual being (civil-from-ms with at-ms being 1843784832406).weekday, expected being 1
+    evaluate same-number with label being "round-trip 1843784832406", actual being (ms-from-http-date with stated being "Mon, 05 Jun 2028 02:27:12 GMT"), expected being 1843784832000
+    evaluate same-text with label being "http 2375736485540", actual being (http-date with at-ms being 2375736485540), expected being "Thu, 13 Apr 2045 22:48:05 GMT"
+    evaluate same-text with label being "iso 2375736485540", actual being (iso-instant with at-ms being 2375736485540), expected being "2045-04-13T22:48:05Z"
+    evaluate same-text with label being "log 2375736485540", actual being (log-date with at-ms being 2375736485540), expected being "13/Apr/2045:22:48:05 +0000"
+    evaluate same-number with label being "weekday 2375736485540", actual being (civil-from-ms with at-ms being 2375736485540).weekday, expected being 4
+    evaluate same-number with label being "round-trip 2375736485540", actual being (ms-from-http-date with stated being "Thu, 13 Apr 2045 22:48:05 GMT"), expected being 2375736485000
+    evaluate same-text with label being "http 2508766814656", actual being (http-date with at-ms being 2508766814656), expected being "Thu, 01 Jul 2049 15:40:14 GMT"
+    evaluate same-text with label being "iso 2508766814656", actual being (iso-instant with at-ms being 2508766814656), expected being "2049-07-01T15:40:14Z"
+    evaluate same-text with label being "log 2508766814656", actual being (log-date with at-ms being 2508766814656), expected being "01/Jul/2049:15:40:14 +0000"
+    evaluate same-number with label being "weekday 2508766814656", actual being (civil-from-ms with at-ms being 2508766814656).weekday, expected being 4
+    evaluate same-number with label being "round-trip 2508766814656", actual being (ms-from-http-date with stated being "Thu, 01 Jul 2049 15:40:14 GMT"), expected being 2508766814000
+    evaluate same-text with label being "http 2462341179960", actual being (http-date with at-ms being 2462341179960), expected being "Sat, 11 Jan 2048 07:39:39 GMT"
+    evaluate same-text with label being "iso 2462341179960", actual being (iso-instant with at-ms being 2462341179960), expected being "2048-01-11T07:39:39Z"
+    evaluate same-text with label being "log 2462341179960", actual being (log-date with at-ms being 2462341179960), expected being "11/Jan/2048:07:39:39 +0000"
+    evaluate same-number with label being "weekday 2462341179960", actual being (civil-from-ms with at-ms being 2462341179960).weekday, expected being 6
+    evaluate same-number with label being "round-trip 2462341179960", actual being (ms-from-http-date with stated being "Sat, 11 Jan 2048 07:39:39 GMT"), expected being 2462341179000
+    evaluate same-text with label being "http 3001392408623", actual being (http-date with at-ms being 3001392408623), expected being "Mon, 09 Feb 2065 08:06:48 GMT"
+    evaluate same-text with label being "iso 3001392408623", actual being (iso-instant with at-ms being 3001392408623), expected being "2065-02-09T08:06:48Z"
+    evaluate same-text with label being "log 3001392408623", actual being (log-date with at-ms being 3001392408623), expected being "09/Feb/2065:08:06:48 +0000"
+    evaluate same-number with label being "weekday 3001392408623", actual being (civil-from-ms with at-ms being 3001392408623).weekday, expected being 1
+    evaluate same-number with label being "round-trip 3001392408623", actual being (ms-from-http-date with stated being "Mon, 09 Feb 2065 08:06:48 GMT"), expected being 3001392408000
+    evaluate same-text with label being "http 451747779979", actual being (http-date with at-ms being 451747779979), expected being "Wed, 25 Apr 1984 13:29:39 GMT"
+    evaluate same-text with label being "iso 451747779979", actual being (iso-instant with at-ms being 451747779979), expected being "1984-04-25T13:29:39Z"
+    evaluate same-text with label being "log 451747779979", actual being (log-date with at-ms being 451747779979), expected being "25/Apr/1984:13:29:39 +0000"
+    evaluate same-number with label being "weekday 451747779979", actual being (civil-from-ms with at-ms being 451747779979).weekday, expected being 3
+    evaluate same-number with label being "round-trip 451747779979", actual being (ms-from-http-date with stated being "Wed, 25 Apr 1984 13:29:39 GMT"), expected being 451747779000
+    evaluate same-text with label being "http 2510758854545", actual being (http-date with at-ms being 2510758854545), expected being "Sat, 24 Jul 2049 17:00:54 GMT"
+    evaluate same-text with label being "iso 2510758854545", actual being (iso-instant with at-ms being 2510758854545), expected being "2049-07-24T17:00:54Z"
+    evaluate same-text with label being "log 2510758854545", actual being (log-date with at-ms being 2510758854545), expected being "24/Jul/2049:17:00:54 +0000"
+    evaluate same-number with label being "weekday 2510758854545", actual being (civil-from-ms with at-ms being 2510758854545).weekday, expected being 6
+    evaluate same-number with label being "round-trip 2510758854545", actual being (ms-from-http-date with stated being "Sat, 24 Jul 2049 17:00:54 GMT"), expected being 2510758854000
+    evaluate same-text with label being "http 827377833287", actual being (http-date with at-ms being 827377833287), expected being "Thu, 21 Mar 1996 03:10:33 GMT"
+    evaluate same-text with label being "iso 827377833287", actual being (iso-instant with at-ms being 827377833287), expected being "1996-03-21T03:10:33Z"
+    evaluate same-text with label being "log 827377833287", actual being (log-date with at-ms being 827377833287), expected being "21/Mar/1996:03:10:33 +0000"
+    evaluate same-number with label being "weekday 827377833287", actual being (civil-from-ms with at-ms being 827377833287).weekday, expected being 4
+    evaluate same-number with label being "round-trip 827377833287", actual being (ms-from-http-date with stated being "Thu, 21 Mar 1996 03:10:33 GMT"), expected being 827377833000
+    evaluate same-text with label being "http 426801197571", actual being (http-date with at-ms being 426801197571), expected being "Mon, 11 Jul 1983 19:53:17 GMT"
+    evaluate same-text with label being "iso 426801197571", actual being (iso-instant with at-ms being 426801197571), expected being "1983-07-11T19:53:17Z"
+    evaluate same-text with label being "log 426801197571", actual being (log-date with at-ms being 426801197571), expected being "11/Jul/1983:19:53:17 +0000"
+    evaluate same-number with label being "weekday 426801197571", actual being (civil-from-ms with at-ms being 426801197571).weekday, expected being 1
+    evaluate same-number with label being "round-trip 426801197571", actual being (ms-from-http-date with stated being "Mon, 11 Jul 1983 19:53:17 GMT"), expected being 426801197000
+    evaluate same-text with label being "http 3133383703337", actual being (http-date with at-ms being 3133383703337), expected being "Wed, 17 Apr 2069 00:21:43 GMT"
+    evaluate same-text with label being "iso 3133383703337", actual being (iso-instant with at-ms being 3133383703337), expected being "2069-04-17T00:21:43Z"
+    evaluate same-text with label being "log 3133383703337", actual being (log-date with at-ms being 3133383703337), expected being "17/Apr/2069:00:21:43 +0000"
+    evaluate same-number with label being "weekday 3133383703337", actual being (civil-from-ms with at-ms being 3133383703337).weekday, expected being 3
+    evaluate same-number with label being "round-trip 3133383703337", actual being (ms-from-http-date with stated being "Wed, 17 Apr 2069 00:21:43 GMT"), expected being 3133383703000
+    evaluate same-text with label being "http 2478465806391", actual being (http-date with at-ms being 2478465806391), expected being "Wed, 15 Jul 2048 22:43:26 GMT"
+    evaluate same-text with label being "iso 2478465806391", actual being (iso-instant with at-ms being 2478465806391), expected being "2048-07-15T22:43:26Z"
+    evaluate same-text with label being "log 2478465806391", actual being (log-date with at-ms being 2478465806391), expected being "15/Jul/2048:22:43:26 +0000"
+    evaluate same-number with label being "weekday 2478465806391", actual being (civil-from-ms with at-ms being 2478465806391).weekday, expected being 3
+    evaluate same-number with label being "round-trip 2478465806391", actual being (ms-from-http-date with stated being "Wed, 15 Jul 2048 22:43:26 GMT"), expected being 2478465806000
+    evaluate same-text with label being "http 2718970283444", actual being (http-date with at-ms being 2718970283444), expected being "Mon, 28 Feb 2056 13:31:23 GMT"
+    evaluate same-text with label being "iso 2718970283444", actual being (iso-instant with at-ms being 2718970283444), expected being "2056-02-28T13:31:23Z"
+    evaluate same-text with label being "log 2718970283444", actual being (log-date with at-ms being 2718970283444), expected being "28/Feb/2056:13:31:23 +0000"
+    evaluate same-number with label being "weekday 2718970283444", actual being (civil-from-ms with at-ms being 2718970283444).weekday, expected being 1
+    evaluate same-number with label being "round-trip 2718970283444", actual being (ms-from-http-date with stated being "Mon, 28 Feb 2056 13:31:23 GMT"), expected being 2718970283000
+    evaluate same-text with label being "http 2182727972319", actual being (http-date with at-ms being 2182727972319), expected being "Thu, 03 Mar 2039 01:19:32 GMT"
+    evaluate same-text with label being "iso 2182727972319", actual being (iso-instant with at-ms being 2182727972319), expected being "2039-03-03T01:19:32Z"
+    evaluate same-text with label being "log 2182727972319", actual being (log-date with at-ms being 2182727972319), expected being "03/Mar/2039:01:19:32 +0000"
+    evaluate same-number with label being "weekday 2182727972319", actual being (civil-from-ms with at-ms being 2182727972319).weekday, expected being 4
+    evaluate same-number with label being "round-trip 2182727972319", actual being (ms-from-http-date with stated being "Thu, 03 Mar 2039 01:19:32 GMT"), expected being 2182727972000
+    evaluate same-text with label being "http 2339384504660", actual being (http-date with at-ms being 2339384504660), expected being "Thu, 18 Feb 2044 05:01:44 GMT"
+    evaluate same-text with label being "iso 2339384504660", actual being (iso-instant with at-ms being 2339384504660), expected being "2044-02-18T05:01:44Z"
+    evaluate same-text with label being "log 2339384504660", actual being (log-date with at-ms being 2339384504660), expected being "18/Feb/2044:05:01:44 +0000"
+    evaluate same-number with label being "weekday 2339384504660", actual being (civil-from-ms with at-ms being 2339384504660).weekday, expected being 4
+    evaluate same-number with label being "round-trip 2339384504660", actual being (ms-from-http-date with stated being "Thu, 18 Feb 2044 05:01:44 GMT"), expected being 2339384504000
+    evaluate same-text with label being "http 3416335495294", actual being (http-date with at-ms being 3416335495294), expected being "Mon, 04 Apr 2078 22:04:55 GMT"
+    evaluate same-text with label being "iso 3416335495294", actual being (iso-instant with at-ms being 3416335495294), expected being "2078-04-04T22:04:55Z"
+    evaluate same-text with label being "log 3416335495294", actual being (log-date with at-ms being 3416335495294), expected being "04/Apr/2078:22:04:55 +0000"
+    evaluate same-number with label being "weekday 3416335495294", actual being (civil-from-ms with at-ms being 3416335495294).weekday, expected being 1
+    evaluate same-number with label being "round-trip 3416335495294", actual being (ms-from-http-date with stated being "Mon, 04 Apr 2078 22:04:55 GMT"), expected being 3416335495000
+    evaluate same-text with label being "http 2045753684719", actual being (http-date with at-ms being 2045753684719), expected being "Sun, 29 Oct 2034 16:54:44 GMT"
+    evaluate same-text with label being "iso 2045753684719", actual being (iso-instant with at-ms being 2045753684719), expected being "2034-10-29T16:54:44Z"
+    evaluate same-text with label being "log 2045753684719", actual being (log-date with at-ms being 2045753684719), expected being "29/Oct/2034:16:54:44 +0000"
+    evaluate same-number with label being "weekday 2045753684719", actual being (civil-from-ms with at-ms being 2045753684719).weekday, expected being 0
+    evaluate same-number with label being "round-trip 2045753684719", actual being (ms-from-http-date with stated being "Sun, 29 Oct 2034 16:54:44 GMT"), expected being 2045753684000
+    evaluate same-text with label being "http 1591084311600", actual being (http-date with at-ms being 1591084311600), expected being "Tue, 02 Jun 2020 07:51:51 GMT"
+    evaluate same-text with label being "iso 1591084311600", actual being (iso-instant with at-ms being 1591084311600), expected being "2020-06-02T07:51:51Z"
+    evaluate same-text with label being "log 1591084311600", actual being (log-date with at-ms being 1591084311600), expected being "02/Jun/2020:07:51:51 +0000"
+    evaluate same-number with label being "weekday 1591084311600", actual being (civil-from-ms with at-ms being 1591084311600).weekday, expected being 2
+    evaluate same-number with label being "round-trip 1591084311600", actual being (ms-from-http-date with stated being "Tue, 02 Jun 2020 07:51:51 GMT"), expected being 1591084311000
+    evaluate same-text with label being "http 1092209182637", actual being (http-date with at-ms being 1092209182637), expected being "Wed, 11 Aug 2004 07:26:22 GMT"
+    evaluate same-text with label being "iso 1092209182637", actual being (iso-instant with at-ms being 1092209182637), expected being "2004-08-11T07:26:22Z"
+    evaluate same-text with label being "log 1092209182637", actual being (log-date with at-ms being 1092209182637), expected being "11/Aug/2004:07:26:22 +0000"
+    evaluate same-number with label being "weekday 1092209182637", actual being (civil-from-ms with at-ms being 1092209182637).weekday, expected being 3
+    evaluate same-number with label being "round-trip 1092209182637", actual being (ms-from-http-date with stated being "Wed, 11 Aug 2004 07:26:22 GMT"), expected being 1092209182000
+    evaluate same-text with label being "http 793685816359", actual being (http-date with at-ms being 793685816359), expected being "Sat, 25 Feb 1995 04:16:56 GMT"
+    evaluate same-text with label being "iso 793685816359", actual being (iso-instant with at-ms being 793685816359), expected being "1995-02-25T04:16:56Z"
+    evaluate same-text with label being "log 793685816359", actual being (log-date with at-ms being 793685816359), expected being "25/Feb/1995:04:16:56 +0000"
+    evaluate same-number with label being "weekday 793685816359", actual being (civil-from-ms with at-ms being 793685816359).weekday, expected being 6
+    evaluate same-number with label being "round-trip 793685816359", actual being (ms-from-http-date with stated being "Sat, 25 Feb 1995 04:16:56 GMT"), expected being 793685816000
+
+    !!! Malformed dates are minus one and never the epoch, which a comparison
+    !!! would read as 1970 and treat as "not modified since the dawn of time".
+    evaluate same-number with label being "an empty date is refused",
+        actual being (ms-from-http-date with stated being ""), expected being 0 minus 1
+    evaluate same-number with label being "a short date is refused",
+        actual being (ms-from-http-date with stated being "Sun, 06 Nov 1994"), expected being 0 minus 1
+    evaluate same-number with label being "a date without GMT is refused",
+        actual being (ms-from-http-date with stated being "Sun, 06 Nov 1994 08:49:37 UTC"), expected being 0 minus 1
+    evaluate same-number with label being "an unknown month is refused",
+        actual being (ms-from-http-date with stated being "Sun, 06 Zzz 1994 08:49:37 GMT"), expected being 0 minus 1
+    evaluate same-number with label being "a non-numeric day is refused",
+        actual being (ms-from-http-date with stated being "Sun, ab Nov 1994 08:49:37 GMT"), expected being 0 minus 1
+    evaluate same-number with label being "an hour of 24 is refused",
+        actual being (ms-from-http-date with stated being "Sun, 06 Nov 1994 24:49:37 GMT"), expected being 0 minus 1
+    evaluate same-number with label being "an obsolete RFC 850 date is refused rather than misread",
+        actual being (ms-from-http-date with stated being "Sunday, 06-Nov-94 08:49:37 GMT"), expected being 0 minus 1
+
+    !!! A pre-epoch stamp is clamped, not formatted by truncating division
+    !!! that would be a day out for exactly the inputs nobody tests.
+    evaluate same-text with label being "a pre-epoch stamp clamps to the epoch",
+        actual being (http-date with at-ms being 0 minus 86400000), expected being "Thu, 01 Jan 1970 00:00:00 GMT"
+    give nothing
+end paragraph
+
+log-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.log.access"
+    value log-file is "tests/tmp-access.log"
+    value err-file is "tests/tmp-error.log"
+    evaluate nil.std.io::delete with path being log-file
+    evaluate nil.std.io::delete with path being err-file
+
+    !!! Off by default: nothing is written until a path is given.
+    evaluate log-to with access-file being "", error-file being ""
+    evaluate is-true with label being "logging is off until asked", actual being not (logging-access with nothing)
+    value sunk is make-request with verb being request-method.Get, target being "/", fields being (no-headers with nothing), body being ""
+    evaluate record-request with client being "192.0.2.10:40001", request being sunk, code being 200, bytes being 5, at-ms being 784111777000
+    evaluate same-number with label being "a request with no log path buffers nothing",
+        actual being (buffered-count with nothing), expected being 0
+
+    evaluate log-to with access-file being log-file, error-file being err-file
+    evaluate is-true with label being "logging is on once a path is given", actual being (logging-access with nothing)
+
+    !!! The Combined Log Format, field by field.
+    variable fields is no-headers with nothing
+    set fields to set-field with fields being fields, name being "Referer", content being "http://example.com/from"
+    set fields to set-field with fields being fields, name being "User-Agent", content being "curl/8.5.0"
+    value logged is make-request with verb being request-method.Get, target being "/posts?page=2",
+        fields being fields, body being ""
+    evaluate record-request with client being "127.0.0.1:54321", request being logged,
+        code being 200, bytes being 1234, at-ms being 784111777000
+    evaluate same-number with label being "a line is buffered", actual being (buffered-count with nothing), expected being 1
+    evaluate flush-now with nothing
+    evaluate same-number with label being "flushing empties the buffer", actual being (buffered-count with nothing), expected being 0
+
+    value written is nil.std.io::read_text with path being log-file
+    consider written
+        when Result.Ok holding body then begin block
+            evaluate same-text with label being "the line is exactly the Combined Log Format",
+                actual being (nil.std.text::trim with s being body),
+                expected being "127.0.0.1:54321 - - [06/Nov/1994:08:49:37 +0000] "
+                    plus quote plus "GET /posts?page=2 HTTP/1.1" plus quote
+                    plus " 200 1234 " plus quote plus "http://example.com/from" plus quote
+                    plus " " plus quote plus "curl/8.5.0" plus quote
+        end block
+        otherwise evaluate is-true with label being "the access log was written", actual being false
+    end consider
+
+    !!! A missing field is a dash, which is what every reader of this format
+    !!! expects and what distinguishes "absent" from "empty".
+    evaluate same-text with label being "an absent field logs as a dash",
+        actual being (shown-for with raw being ""), expected being "-"
+
+    !!! Log forging. A newline in a header would end the line and start one of
+    !!! the attacker's choosing -- a forged entry in a file read as evidence.
+    evaluate is-true with label being "a newline in a header cannot end the log line",
+        actual being not (nil.std.text::contains with s being
+            (one-line with raw being ("evil" plus newline plus "192.0.2.10 - - [x] fake")), needle being newline)
+    evaluate is-true with label being "a quote in a header cannot close the field early",
+        actual being not (nil.std.text::contains with s being
+            (one-line with raw being ("a" plus quote plus "b")), needle being quote)
+    evaluate is-true with label being "a backslash is removed too",
+        actual being not (nil.std.text::contains with s being (one-line with raw being "a\\b"), needle being "\\")
+    evaluate same-number with label being "sanitising does not change the length a reader sees",
+        actual being (nil.std.text::length with s being (one-line with raw being ("a" plus quote plus "b"))), expected being 3
+    evaluate same-text with label being "an escape sequence cannot colour a terminal",
+        actual being (one-line with raw being ("x" plus (nil.std.text::from_byte with code being 27) plus "[31mred")),
+        expected being "x [31mred"
+
+    !!! A malformed request has no request line to log, and logging the raw
+    !!! bytes would put attacker text into the file.
+    evaluate record-malformed with client being "127.0.0.1:1", code being 400, at-ms being 784111777000
+    evaluate flush-now with nothing
+    value after-bad is nil.std.io::read_text with path being log-file
+    consider after-bad
+        when Result.Ok holding body then
+            evaluate is-true with label being "a malformed request logs a dash, not its bytes",
+                actual being (nil.std.text::contains with s being body, needle being quote plus "-" plus quote plus " 400 0")
+        otherwise evaluate is-true with label being "the malformed line was written", actual being false
+    end consider
+
+    !!! The error log sorts in time order because the instant comes first.
+    evaluate record-error with severity being "warn", message being "a port was taken", at-ms being 784111777000
+    evaluate flush-now with nothing
+    value errors is nil.std.io::read_text with path being err-file
+    consider errors
+        when Result.Ok holding body then
+            evaluate same-text with label being "an error line leads with an ISO instant",
+                actual being (nil.std.text::trim with s being body),
+                expected being "1994-11-06T08:49:37Z [warn] a port was taken"
+        otherwise evaluate is-true with label being "the error log was written", actual being false
+    end consider
+
+    !!! A log that cannot be written must not turn every request into a second
+    !!! failure, and must not grow the buffer until the process runs out of
+    !!! memory. The lines are dropped and counted.
+    value before-drops is dropped-count with nothing
+    evaluate log-to with access-file being "tests/no-such-directory/access.log", error-file being ""
+    evaluate record-request with client being "192.0.2.10:40002", request being logged, code being 200, bytes being 1, at-ms being 784111777000
+    evaluate flush-now with nothing
+    evaluate same-number with label being "an unwritable log holds nothing",
+        actual being (buffered-count with nothing), expected being 0
+    evaluate is-true with label being "an unwritable log counts what it dropped",
+        actual being (dropped-count with nothing) is greater than before-drops
+
+    evaluate log-to with access-file being "", error-file being ""
+    evaluate nil.std.io::delete with path being log-file
+    evaluate nil.std.io::delete with path being err-file
+    give nothing
+end paragraph
+
+
+!!! The log module keeps `shown` private; this is the same rule, for the test.
+shown-for receives raw as text returns text begin paragraph
+    value cleaned is one-line with raw being raw
+    give when cleaned equals "" give "-" otherwise give cleaned end when
+end paragraph
+
 main returns number begin paragraph
     say "nilweb tests"
     evaluate scan-tests with nothing
@@ -999,5 +1406,7 @@ main returns number begin paragraph
     evaluate static-tests with nothing
     evaluate middleware-tests with nothing
     evaluate listener-tests with nothing
+    evaluate clock-tests with nothing
+    evaluate log-tests with nothing
     give verdict with nothing
 end paragraph

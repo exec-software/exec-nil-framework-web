@@ -82,6 +82,10 @@ public connection begin record
     !!! When the current request started arriving, and when anything last did.
     field started-at as number
     field touched-at as number
+    !!! Captured at accept, because by the time a response is logged the
+    !!! socket may be closed and getpeername would fail. For the log only:
+    !!! an address is not an identity, and behind a proxy it is the proxy's.
+    field peer as text
 end record
 
 
@@ -106,11 +110,14 @@ public pumped begin record
     field request as text
     !!! Whether the client asked to keep the connection open.
     field keep-alive as boolean
+    !!! The peer's address, for the access log.
+    field peer as text
 end record
 
 
 nothing-found returns pumped begin paragraph
-    give build pumped with found being false, handle being 0, request being "", keep-alive being false
+    give build pumped with found being false, handle being 0, request being "",
+        keep-alive being false, peer being ""
 end paragraph
 
 
@@ -317,7 +324,8 @@ admit receives server as engine, client as number returns nothing begin paragrap
     value free-slot is dead-slot-of with server being server
     value fresh is build connection with handle being client, gathered being "", outgoing being "",
         sent being 0, served being 0, live being true, keeping being true,
-        started-at being now-at, touched-at being now-at
+        started-at being now-at, touched-at being now-at,
+        peer being (peer-of with handle being client)
     when free-slot is at least 0 then
         set server.connections at free-slot to fresh
     otherwise
@@ -379,7 +387,7 @@ absorb receives server as engine, slot as number, piece as text returns nothing 
     set server.connections at slot to build connection with handle being held.handle,
         gathered being whole, outgoing being held.outgoing, sent being held.sent,
         served being held.served, live being true, keeping being held.keeping,
-        started-at being held.started-at, touched-at being now-at
+        started-at being held.started-at, touched-at being now-at, peer being held.peer
     give nothing
 end paragraph
 
@@ -395,7 +403,8 @@ first-framed receives server as engine returns pumped begin paragraph
             when request-is-complete with message being held.gathered then
                 give build pumped with found being true, handle being held.handle,
                     request being held.gathered,
-                    keep-alive being (wants-keep-alive with message being held.gathered)
+                    keep-alive being (wants-keep-alive with message being held.gathered),
+                    peer being held.peer
             end when
         end when
         set index to index plus 1
@@ -422,7 +431,7 @@ public reply receives server as engine, handle as number, response as text, keep
         gathered being "", outgoing being response, sent being 0,
         served being held.served plus 1, live being true,
         keeping being keep-open and more-allowed,
-        started-at being now-at, touched-at being now-at
+        started-at being now-at, touched-at being now-at, peer being held.peer
     set server.served-total to server.served-total plus 1
     evaluate push-outgoing with server being server, slot being slot
     give nothing
@@ -457,7 +466,7 @@ push-outgoing receives server as engine, slot as number returns nothing begin pa
             set server.connections at slot to build connection with handle being held.handle,
                 gathered being held.gathered, outgoing being held.outgoing, sent being now-sent,
                 served being held.served, live being true, keeping being held.keeping,
-                started-at being held.started-at, touched-at being now-at
+                started-at being held.started-at, touched-at being now-at, peer being held.peer
             when now-sent is less than width then
                 !!! More to go. Watch for writability so the next pass carries
                 !!! on, rather than spinning on a socket that is full.
@@ -483,7 +492,8 @@ finish-response receives server as engine, slot as number returns nothing begin 
     value now-at is now in milliseconds
     set server.connections at slot to build connection with handle being held.handle,
         gathered being "", outgoing being "", sent being 0, served being held.served,
-        live being true, keeping being true, started-at being now-at, touched-at being now-at
+        live being true, keeping being true, started-at being now-at, touched-at being now-at,
+        peer being held.peer
     evaluate nil.std.net::watch with handle being held.handle, flags being nil.std.net::ready_readable
     give nothing
 end paragraph
@@ -498,7 +508,7 @@ drop receives server as engine, slot as number returns nothing begin paragraph
     evaluate nil.std.net::close with handle being held.handle
     set server.connections at slot to build connection with handle being 0, gathered being "",
         outgoing being "", sent being 0, served being 0, live being false, keeping being false,
-        started-at being 0, touched-at being 0
+        started-at being 0, touched-at being 0, peer being ""
     set server.open-count to server.open-count minus 1
     give nothing
 end paragraph
@@ -667,6 +677,18 @@ end paragraph
 
 
 !!! --- Where the server can be reached, for the line printed at startup.
+
+!!! --- The peer's address, or "" when it cannot be read.
+!!! Never a decision, only a log line.
+
+peer-of receives handle as number returns text begin paragraph
+    value found is nil.std.net::peer_address with handle being handle
+    consider found
+        when Result.Ok holding shown then give shown
+        otherwise give ""
+    end consider
+end paragraph
+
 
 public address-text receives host as text, port as number returns text begin paragraph
     value shown is when host equals "" give "0.0.0.0" otherwise give host end when

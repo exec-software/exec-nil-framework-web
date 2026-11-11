@@ -1,0 +1,313 @@
+!!! Dates and times, from milliseconds since the epoch.
+!!!
+!!! Three formats are needed and none of them is available: HTTP's own date
+!!! format for Last-Modified, Date and Expires; the Common Log Format stamp an
+!!! access log line carries; and an ISO instant for an error log. nil.std has
+!!! a datetime module but nothing that turns an epoch millisecond count into
+!!! a calendar date, which is the part that is actually hard.
+!!!
+!!! Everything here is UTC. HTTP requires GMT in a date header, and an access
+!!! log in UTC is one that can be read alongside another machine's without
+!!! anyone working out what two offsets meant on the night the clocks changed.
+!!!
+!!! The calendar arithmetic is Howard Hinnant's `civil_from_days`, which is
+!!! exact integer work with no table and no leap-year special cases beyond the
+!!! era arithmetic. It is written out rather than approximated because a date
+!!! that is wrong one day in four years is worse than no date from-index all: it looks
+!!! right in every test anyone writes in the other three.
+
+book nilweb.time.clock
+
+read nil.std.text
+read nil.std.text.string_utils
+
+
+constant ms-per-second as number is 1000
+constant seconds-per-day as number is 86400
+
+
+public calendar-time begin record
+    field year as number
+    !!! 1..12 and 1..31, as a person writes them, not zero-based.
+    field month as number
+    field day as number
+    field hour as number
+    field minute as number
+    field second as number
+    !!! 0 is Sunday, as every date format here spells it.
+    field weekday as number
+end record
+
+
+!!! --- Break an epoch millisecond count into a UTC calendar time.
+!!!
+!!! A negative count — a file stamped before 1970, which happens on restored
+!!! archives — is clamped to the epoch rather than formatted. The alternative
+!!! is floor division over negative numbers, and Matrix's `over` truncates
+!!! toward zero, so the arithmetic below would be a day out for exactly the
+!!! inputs nobody tests. A clamped date is visibly wrong; an off-by-one date
+!!! is not.
+
+public civil-from-ms receives at-ms as number returns calendar-time begin paragraph
+    value safe-ms is when at-ms is less than 0 give 0 otherwise give at-ms end when
+    value total-seconds is safe-ms over ms-per-second
+    value days is total-seconds over seconds-per-day
+    value rest is total-seconds minus (days times seconds-per-day)
+
+    !!! Days offset-days so the era arithmetic starts from 0000-03-01, which is
+    !!! what makes the leap day the last day of a year rather than a hole in
+    !!! the middle of one.
+    value offset-days is days plus 719468
+    value era is offset-days over 146097
+    value day-of-era is offset-days minus (era times 146097)
+    value year-of-era is (day-of-era minus (day-of-era over 1460)
+        plus (day-of-era over 36524) minus (day-of-era over 146096)) over 365
+    value day-of-year is day-of-era minus ((365 times year-of-era)
+        plus (year-of-era over 4) minus (year-of-era over 100))
+    value shifted-month is ((5 times day-of-year) plus 2) over 153
+    value day is day-of-year minus (((153 times shifted-month) plus 2) over 5) plus 1
+    value month is when shifted-month is less than 10
+        give shifted-month plus 3
+        otherwise give shifted-month minus 9
+    end when
+    value year is year-of-era plus (era times 400) plus (when month is at most 2 give 1 otherwise give 0 end when)
+
+    give build calendar-time with
+        year being year,
+        month being month,
+        day being day,
+        hour being rest over 3600,
+        minute being (rest over 60) remainder 60,
+        second being rest remainder 60,
+        weekday being (days plus 4) remainder 7
+end paragraph
+
+
+!!! --- An HTTP date, as RFC 9110 requires it.
+!!!
+!!! "Sun, 06 Nov 1994 08:49:37 GMT" — the IMF-fixdate form, fixed width, with
+!!! English day and month abbreviations that do not vary by locale because the
+!!! specification says they do not. The two obsolete formats a client may
+!!! still send are read by `ms-from-http-date` and never written.
+
+public http-date receives at-ms as number returns text begin paragraph
+    value when-at is civil-from-ms with at-ms being at-ms
+    give (weekday-name with index being when-at.weekday) plus ", "
+        plus (two-digits with amount being when-at.day) plus " "
+        plus (month-name with index being when-at.month) plus " "
+        plus (four-digits with amount being when-at.year) plus " "
+        plus (two-digits with amount being when-at.hour) plus ":"
+        plus (two-digits with amount being when-at.minute) plus ":"
+        plus (two-digits with amount being when-at.second) plus " GMT"
+end paragraph
+
+
+!!! --- The stamp in a Common Log Format line.
+!!!
+!!! "[10/Oct/2000:13:55:36 +0000]" — the form Apache and nginx write and every
+!!! log reader already parses. The offset is always +0000 because everything
+!!! here is UTC; a reader that expects a local offset gets a correct one.
+
+public log-date receives at-ms as number returns text begin paragraph
+    value when-at is civil-from-ms with at-ms being at-ms
+    give (two-digits with amount being when-at.day) plus "/"
+        plus (month-name with index being when-at.month) plus "/"
+        plus (four-digits with amount being when-at.year) plus ":"
+        plus (two-digits with amount being when-at.hour) plus ":"
+        plus (two-digits with amount being when-at.minute) plus ":"
+        plus (two-digits with amount being when-at.second) plus " +0000"
+end paragraph
+
+
+!!! --- An ISO 8601 instant, for an error log or a diagnostic.
+!!! "1994-11-06T08:49:37Z" — sorts lexicographically in time order, which is
+!!! the property a log line wants above all others.
+
+public iso-instant receives at-ms as number returns text begin paragraph
+    value when-at is civil-from-ms with at-ms being at-ms
+    give (four-digits with amount being when-at.year) plus "-"
+        plus (two-digits with amount being when-at.month) plus "-"
+        plus (two-digits with amount being when-at.day) plus "T"
+        plus (two-digits with amount being when-at.hour) plus ":"
+        plus (two-digits with amount being when-at.minute) plus ":"
+        plus (two-digits with amount being when-at.second) plus "Z"
+end paragraph
+
+
+!!! --- Read a date a client sent, as milliseconds, or minus one.
+!!!
+!!! Only the IMF-fixdate form is accepted. RFC 9110 lists two obsolete formats
+!!! a recipient "must accept", and this does not: a conditional request whose
+!!! date cannot be read is answered with the full representation, which is
+!!! always correct and merely less efficient. Mis-reading a date is not —
+!!! a date read as earlier than it was serves a stale response.
+!!!
+!!! A date that does not parse, or that names a month or day outside its
+!!! range, is minus one so a caller cannot mistake it for the epoch.
+
+public ms-from-http-date receives stated as text returns number begin paragraph
+    value trimmed is nil.std.text::trim with s being stated
+    !!! "Sun, 06 Nov 1994 08:49:37 GMT" is 29 characters, always.
+    when not ((nil.std.text::length with s being trimmed) equals 29) then
+        give 0 minus 1
+    end when
+    when not (nil.std.text::ends_with with s being trimmed, suffix being " GMT") then
+        give 0 minus 1
+    end when
+
+    value day is two-digit-value with text-held being trimmed, from-index being 5
+    value month is month-index with name being
+        (nil.std.text::substring with s being trimmed, start being 8, length being 3)
+    value year is four-digit-value with text-held being trimmed, from-index being 12
+    value hour is two-digit-value with text-held being trimmed, from-index being 17
+    value minute is two-digit-value with text-held being trimmed, from-index being 20
+    value second is two-digit-value with text-held being trimmed, from-index being 23
+
+    value sane is day is at least 1 and day is at most 31
+        and month is at least 1 and year is at least 1970
+        and hour is at least 0 and hour is at most 23
+        and minute is at least 0 and minute is at most 59
+        and second is at least 0 and second is at most 60
+    when not sane then
+        give 0 minus 1
+    end when
+    give ms-from-civil with year being year, month being month, day being day,
+        hour being hour, minute being minute, second being second
+end paragraph
+
+
+!!! --- The inverse of civil-from-ms, for a date that was read rather than
+!!! formatted. Hinnant's `days_from_civil`, the same arithmetic run backwards.
+
+public ms-from-civil receives year as number, month as number, day as number,
+    hour as number, minute as number, second as number returns number begin paragraph
+    value shifted-year is year minus (when month is at most 2 give 1 otherwise give 0 end when)
+    value era is shifted-year over 400
+    value year-of-era is shifted-year minus (era times 400)
+    value shifted-month is when month is greater than 2 give month minus 3 otherwise give month plus 9 end when
+    value day-of-year is (((153 times shifted-month) plus 2) over 5) plus day minus 1
+    value day-of-era is (365 times year-of-era) plus (year-of-era over 4)
+        minus (year-of-era over 100) plus day-of-year
+    value days is (era times 146097) plus day-of-era minus 719468
+    give (((days times seconds-per-day) plus (hour times 3600) plus (minute times 60) plus second)
+        times ms-per-second)
+end paragraph
+
+
+weekday-name receives index as number returns text begin paragraph
+    give switch index
+        case 0 then stop switching with "Sun"
+        case 1 then stop switching with "Mon"
+        case 2 then stop switching with "Tue"
+        case 3 then stop switching with "Wed"
+        case 4 then stop switching with "Thu"
+        case 5 then stop switching with "Fri"
+        otherwise stop switching with "Sat"
+    end switch
+end paragraph
+
+
+month-name receives index as number returns text begin paragraph
+    give switch index
+        case 1 then stop switching with "Jan"
+        case 2 then stop switching with "Feb"
+        case 3 then stop switching with "Mar"
+        case 4 then stop switching with "Apr"
+        case 5 then stop switching with "May"
+        case 6 then stop switching with "Jun"
+        case 7 then stop switching with "Jul"
+        case 8 then stop switching with "Aug"
+        case 9 then stop switching with "Sep"
+        case 10 then stop switching with "Oct"
+        case 11 then stop switching with "Nov"
+        otherwise stop switching with "Dec"
+    end switch
+end paragraph
+
+
+month-index receives name as text returns number begin paragraph
+    give switch name
+        case "Jan" then stop switching with 1
+        case "Feb" then stop switching with 2
+        case "Mar" then stop switching with 3
+        case "Apr" then stop switching with 4
+        case "May" then stop switching with 5
+        case "Jun" then stop switching with 6
+        case "Jul" then stop switching with 7
+        case "Aug" then stop switching with 8
+        case "Sep" then stop switching with 9
+        case "Oct" then stop switching with 10
+        case "Nov" then stop switching with 11
+        case "Dec" then stop switching with 12
+        otherwise stop switching with 0 minus 1
+    end switch
+end paragraph
+
+
+!!! --- Fixed-width digits. A date header is fixed width by specification, and
+!!! a caller must not have to remember to pad.
+
+public two-digits receives amount as number returns text begin paragraph
+    when amount is less than 0 or amount is greater than 99 then
+        give "00"
+    end when
+    give (digit-glyph with amount being amount over 10) plus (digit-glyph with amount being amount remainder 10)
+end paragraph
+
+
+four-digits receives amount as number returns text begin paragraph
+    when amount is less than 0 or amount is greater than 9999 then
+        give "0000"
+    end when
+    give (digit-glyph with amount being amount over 1000)
+        plus (digit-glyph with amount being (amount over 100) remainder 10)
+        plus (digit-glyph with amount being (amount over 10) remainder 10)
+        plus (digit-glyph with amount being amount remainder 10)
+end paragraph
+
+
+digit-glyph receives amount as number returns text begin paragraph
+    give switch amount
+        case 0 then stop switching with "0"
+        case 1 then stop switching with "1"
+        case 2 then stop switching with "2"
+        case 3 then stop switching with "3"
+        case 4 then stop switching with "4"
+        case 5 then stop switching with "5"
+        case 6 then stop switching with "6"
+        case 7 then stop switching with "7"
+        case 8 then stop switching with "8"
+        otherwise stop switching with "9"
+    end switch
+end paragraph
+
+
+two-digit-value receives text-held as text, from-index as number returns number begin paragraph
+    value high is digit-value with text-held being text-held, from-index being from-index
+    value low is digit-value with text-held being text-held, from-index being from-index plus 1
+    when high is less than 0 or low is less than 0 then
+        give 0 minus 1
+    end when
+    give (high times 10) plus low
+end paragraph
+
+
+four-digit-value receives text-held as text, from-index as number returns number begin paragraph
+    value a is digit-value with text-held being text-held, from-index being from-index
+    value b is digit-value with text-held being text-held, from-index being from-index plus 1
+    value c is digit-value with text-held being text-held, from-index being from-index plus 2
+    value d is digit-value with text-held being text-held, from-index being from-index plus 3
+    when a is less than 0 or b is less than 0 or c is less than 0 or d is less than 0 then
+        give 0 minus 1
+    end when
+    give (a times 1000) plus (b times 100) plus (c times 10) plus d
+end paragraph
+
+
+digit-value receives text-held as text, from-index as number returns number begin paragraph
+    value code is nil.std.text::byte_at with s being text-held, index being from-index
+    when code is less than 48 or code is greater than 57 then
+        give 0 minus 1
+    end when
+    give code minus 48
+end paragraph

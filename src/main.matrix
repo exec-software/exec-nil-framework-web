@@ -31,6 +31,8 @@ read everything from nilweb.static.files
 read nil.std.text.string_utils
 read everything from nilweb.middleware.chain
 read everything from nilweb.server.engine
+read everything from nilweb.time.clock
+read everything from nilweb.log.access
 read nil.std.system.environment
 
 
@@ -70,7 +72,18 @@ end paragraph
 !!! --- One request in, one response out. This is what a transport calls.
 
 public answer receives raw as text returns text begin paragraph
-    value request is parse-request with raw being raw
+    give answer-parsed with request being (parse-request with raw being raw)
+end paragraph
+
+
+!!! --- The same, for a caller that has already parsed.
+!!!
+!!! The serving loop needs the parsed request anyway, for the access log. When
+!!! `answer` took only text, the loop parsed once for the log and `answer`
+!!! parsed again for the response, and that second parse cost a third of the
+!!! throughput. Measured, not guessed: 422 req/s became 270.
+
+public answer-parsed receives request as http-request returns text begin paragraph
     when not request.well-formed then
         give render-for-get with response being
             (error-response with code being status-bad-request, explanation being request.complaint)
@@ -278,13 +291,27 @@ serve receives host as text, port as number, share as boolean returns number beg
         otherwise evaluate freeze-cache with frozen being true
     end consider
 
+    evaluate set-up-logging with nothing
     say "nil-web listening on " plus (address-text with host being host, port being port)
     say "Ctrl-C to stop."
 
     repeat forever
         value ready is pump with server being server, timeout being pass-timeout-ms
         when ready.found then
-            value reply-text is answer with raw being ready.request
+            value at-ms is now in milliseconds
+            !!! Parsed once. `answer-parsed` takes it from here rather than
+            !!! parsing the same bytes a second time for the response.
+            value request is parse-request with raw being ready.request
+            value reply-text is answer-parsed with request being request
+            when request.well-formed then
+                evaluate record-request with client being ready.peer, request being request,
+                    code being (status-in with response-text being reply-text),
+                    bytes being (body-length-in with response-text being reply-text), at-ms being at-ms
+            end when
+            when not request.well-formed then
+                evaluate record-malformed with client being ready.peer,
+                    code being (status-in with response-text being reply-text), at-ms being at-ms
+            end when
             evaluate reply with server being server, handle being ready.handle,
                 response being (with-connection-header with response-text being reply-text,
                     keeping being ready.keep-alive),
@@ -293,9 +320,14 @@ serve receives host as text, port as number, share as boolean returns number beg
         when not ready.found then
             !!! Nothing framed this pass. Close whatever has stopped making
             !!! progress: a connection that said nothing, one sending a request
-            !!! a byte at a time, or one idle between keep-alive requests.
+            !!! a byte at a time, or one idle between keep-alive requests. Then
+            !!! write the log, because an idle pass is the one moment when
+            !!! three syscalls cost nobody any latency.
             evaluate sweep-idle with server being server
+            evaluate flush-now with nothing
             when not (server.complaint equals "") then
+                evaluate record-error with severity being "warn", message being server.complaint,
+                    at-ms being (now in milliseconds)
                 say "loop: " plus server.complaint
                 set server.complaint to ""
             end when
@@ -303,6 +335,61 @@ serve receives host as text, port as number, share as boolean returns number beg
     end repeat
     evaluate stop-engine with server being server
     give 0
+end paragraph
+
+
+!!! --- The status a rendered response carries, read back off the text.
+!!!
+!!! The loop holds the response as text because that is what goes on the
+!!! wire, and the log wants the status and the body length. Read back rather
+!!! than threaded through `answer`, which would mean every handler returning a
+!!! pair so that one line of logging could have a number.
+
+status-in receives response-text as text returns number begin paragraph
+    value space is nil.std.text::index_of with s being response-text, needle being " "
+    when space is less than 0 then
+        give 0
+    end when
+    value three is nil.std.text::substring with s being response-text, start being space plus 1, length being 3
+    give digits-of with digits being three
+end paragraph
+
+
+body-length-in receives response-text as text returns number begin paragraph
+    value marker is (crlf with nothing) plus (crlf with nothing)
+    value cut is nil.std.text::index_of with s being response-text, needle being marker
+    when cut is less than 0 then
+        give 0
+    end when
+    value starts is cut plus 4
+    give (nil.std.text::length with s being response-text) minus starts
+end paragraph
+
+
+!!! --- Where the logs go, from the environment. Off unless asked, because a
+!!! framework that starts writing files into whatever directory it was
+!!! launched from fills a disk on someone's laptop.
+
+set-up-logging returns nothing begin paragraph
+    value access-file is environment-text with name being "NILWEB_ACCESS_LOG"
+    value error-file is environment-text with name being "NILWEB_ERROR_LOG"
+    evaluate log-to with access-file being access-file, error-file being error-file
+    when not (access-file equals "") then
+        say "access log: " plus access-file
+    end when
+    when not (error-file equals "") then
+        say "error log: " plus error-file
+    end when
+    give nothing
+end paragraph
+
+
+environment-text receives name as text returns text begin paragraph
+    value stated is nil.std.system::get_environment_variable with name being name
+    consider stated
+        when Option.Some holding text-held then give text-held
+        otherwise give ""
+    end consider
 end paragraph
 
 

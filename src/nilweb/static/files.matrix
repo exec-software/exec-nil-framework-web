@@ -21,6 +21,7 @@ read everything from nilweb.text.scan
 read everything from nilweb.http.status
 read everything from nilweb.http.headers
 read everything from nilweb.http.request
+read everything from nilweb.time.clock
 read everything from nilweb.http.response
 
 
@@ -276,10 +277,18 @@ public serve-revalidated receives root as text, path as text, request as http-re
         give error-response with code being status-not-found, explanation being "No such file"
     end when
 
+    !!! The tag is checked before the date, as RFC 9110 requires: a client
+    !!! sending both means the tag to win, because it is the precise one.
     value offered is header-of with request being request, name being "If-None-Match"
-    when tag-matches with offered being offered, tag being marks.tag then
+    value since is header-of with request being request, name being "If-Modified-Since"
+    value by-tag is tag-matches with offered being offered, tag being marks.tag
+    value by-date is offered equals ""
+        and (not-modified-since with stated being since, stamped-at being marks.stamped-at)
+    when by-tag or by-date then
         variable fields is no-headers with nothing
         set fields to set-field with fields being fields, name being "ETag", content being marks.tag
+        set fields to set-field with fields being fields, name being "Last-Modified",
+            content being (http-date with at-ms being marks.stamped-at)
         set fields to set-field with fields being fields, name being "Cache-Control",
             content being "public, max-age=" plus (seconds becomes text)
         give build http-response with code being status-not-modified, fields being fields, body being ""
@@ -289,9 +298,35 @@ public serve-revalidated receives root as text, path as text, request as http-re
     when answer.code does not equal status-ok then
         give answer
     end when
-    value tagged is with-header with response being answer, name being "ETag", content being marks.tag
-    give with-header with response being tagged, name being "Cache-Control",
+    variable full is with-header with response being answer, name being "ETag", content being marks.tag
+    set full to with-header with response being full, name being "Last-Modified",
+        content being (http-date with at-ms being marks.stamped-at)
+    give with-header with response being full, name being "Cache-Control",
         content being "public, max-age=" plus (seconds becomes text)
+end paragraph
+
+
+!!! --- Whether the file is unchanged since the date a client holds.
+!!!
+!!! Compared in seconds, because an HTTP date has no finer resolution: a file
+!!! written 300ms after the second the client was told would otherwise look
+!!! modified on every request, forever, and the client would never get a 304.
+!!! Truncating both sides to the second is what the specification's own
+!!! comparison means.
+!!!
+!!! An unreadable date is "modified" — the full representation, which is
+!!! always correct. Reading it wrongly and answering 304 would serve a stale
+!!! page, which is the failure that matters.
+
+not-modified-since receives stated as text, stamped-at as number returns boolean begin paragraph
+    when stated equals "" then
+        give false
+    end when
+    value held is ms-from-http-date with stated being stated
+    when held is less than 0 then
+        give false
+    end when
+    give (stamped-at over 1000) is at most (held over 1000)
 end paragraph
 
 

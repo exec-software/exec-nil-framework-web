@@ -1,0 +1,321 @@
+!!! Access and error logs.
+!!!
+!!! A server you cannot see is a server you cannot operate: no way to know
+!!! which request 500'd, which client is hammering a route, or whether the
+!!! thing is serving at all. This writes the two logs every other server
+!!! writes, in the format every log reader already parses.
+!!!
+!!! The access log is the Combined Log Format, which is Apache's and nginx's:
+!!!
+!!!   127.0.0.1 - - [10/Oct/2000:13:55:36 +0000] "GET /x HTTP/1.1" 200 2326 "-" "curl/8"
+!!!
+!!! Not a format of our own. Anything that reads a web server's logs — GoAccess,
+!!! an ELK pipeline, awk — already reads this one, and a new format would mean
+!!! every one of those needed teaching.
+!!!
+!!! BUFFERED, AND WHY.
+!!!
+!!! nil.std.io's only appending call is `append_text`, which opens, writes and
+!!! closes. Per request that is three syscalls on the hot path, and the handle
+!!! API that would avoid them is private and takes raw byte buffers a Matrix
+!!! page cannot build. So lines are held and written in batches.
+!!!
+!!! The server flushes when it has nothing to serve, which it already detects
+!!! each pass. Logging then costs nothing under load and an idle server has an
+!!! up-to-date log — the two things that matter, in the order they matter. A
+!!! ceiling forces a flush as well, so sustained load cannot grow the buffer
+!!! without bound.
+!!!
+!!! What this costs is a window: lines buffered when the process dies are
+!!! lost. That is the trade `append_text` imposes, it is stated here rather
+!!! than discovered, and `flush-now` is available to anything that would
+!!! rather pay the syscalls.
+
+book nilweb.log.access
+
+read nil.std.core
+read nil.std.io.file
+read nil.std.text
+read nil.std.text.string_utils
+read everything from nilweb.time.clock
+read everything from nilweb.text.scan
+read everything from nilweb.http.method
+read everything from nilweb.http.headers
+read everything from nilweb.http.request
+
+
+!!! Lines held before a flush is forced regardless of whether the server is
+!!! busy. Low enough that a crash loses little, high enough that a loaded
+!!! server is not opening the file every few requests.
+constant buffer-limit as number is 64
+
+
+public variable access-path as text is ""
+public variable error-path as text is ""
+public variable access-buffer as array of text is []
+public variable error-buffer as array of text is []
+!!! Lines dropped because the log could not be written. Counted rather than
+!!! reported per line: a log that cannot be written must not turn every
+!!! request into a second failure, but silence about it would be worse.
+public variable dropped-lines as number is 0
+
+!!! The last formatted log stamp, and the second it belongs to.
+!!!
+!!! Formatting one means the full calendar conversion, and at a few hundred
+!!! requests a second the answer is the same for hundreds of them in a row.
+!!! Keyed on the epoch second because that is the resolution the format has.
+!!!
+!!! Also did not show as a throughput gain when measured. Logging costs about
+!!! a fifth of the request rate and neither this nor the scan above is where
+!!! it goes; that is still unaccounted for and recorded as such in the README
+!!! rather than attributed to a guess.
+variable stamp-second as number is 0 minus 1
+variable stamp-text as text is ""
+
+
+stamp-for receives at-ms as number returns text begin paragraph
+    value second-of is at-ms over 1000
+    when second-of equals nilweb.log.access::stamp-second then
+        give nilweb.log.access::stamp-text
+    end when
+    value formatted is log-date with at-ms being at-ms
+    set nilweb.log.access::stamp-second to second-of
+    set nilweb.log.access::stamp-text to formatted
+    give formatted
+end paragraph
+
+
+!!! --- Where the logs go. An empty path means that log is off.
+!!!
+!!! Off by default. A framework that starts writing files into whatever
+!!! directory it was launched from, without being asked, is a framework that
+!!! fills a disk on someone's laptop.
+
+public log-to receives access-file as text, error-file as text returns nothing begin paragraph
+    set nilweb.log.access::access-path to access-file
+    set nilweb.log.access::error-path to error-file
+    give nothing
+end paragraph
+
+
+public logging-access returns boolean begin paragraph
+    give not (nilweb.log.access::access-path equals "")
+end paragraph
+
+
+public buffered-count returns number begin paragraph
+    give (the length of nilweb.log.access::access-buffer)
+        plus (the length of nilweb.log.access::error-buffer)
+end paragraph
+
+
+public dropped-count returns number begin paragraph
+    give nilweb.log.access::dropped-lines
+end paragraph
+
+
+!!! --- Record one served request.
+!!!
+!!! `bytes` is the body's length and not the whole response, because that is
+!!! what the format means and what every reader summing the column expects.
+!!! A request that produced no body logs 0 rather than "-"; both are seen in
+!!! the wild and a number is easier to sum.
+
+public record-request receives client as text, request as http-request, code as number,
+    bytes as number, at-ms as number returns nothing begin paragraph
+    when not (logging-access with nothing) then
+        give nothing
+    end when
+
+    value line is (shown with raw being client) plus " - - ["
+        plus (stamp-for with at-ms being at-ms) plus "] "
+        plus quote plus (request-line-of with request being request) plus quote plus " "
+        plus (code becomes text) plus " " plus (bytes becomes text) plus " "
+        plus quote plus (shown with raw being (header-of with request being request, name being "Referer")) plus quote plus " "
+        plus quote plus (shown with raw being (header-of with request being request, name being "User-Agent")) plus quote
+    append line to nilweb.log.access::access-buffer
+    when (the length of nilweb.log.access::access-buffer) is at least buffer-limit then
+        evaluate flush-now with nothing
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- Record a request that could not be parsed.
+!!! Logged with a dash where the request line would be, because there is no
+!!! request line: logging the raw bytes would put attacker-controlled text
+!!! into the log, which is how a log viewer becomes the vulnerability.
+
+public record-malformed receives client as text, code as number, at-ms as number returns nothing begin paragraph
+    when not (logging-access with nothing) then
+        give nothing
+    end when
+    append (shown with raw being client) plus " - - ["
+        plus (stamp-for with at-ms being at-ms) plus "] " plus quote plus "-" plus quote plus " "
+        plus (code becomes text) plus " 0 " plus quote plus "-" plus quote plus " " plus quote plus "-" plus quote
+        to nilweb.log.access::access-buffer
+    give nothing
+end paragraph
+
+
+!!! --- Record something the operator needs to know.
+!!! One line, an ISO instant first so the file sorts in time order.
+
+public record-error receives severity as text, message as text, at-ms as number returns nothing begin paragraph
+    when nilweb.log.access::error-path equals "" then
+        give nothing
+    end when
+    append (iso-instant with at-ms being at-ms) plus " [" plus severity plus "] "
+        plus (one-line with raw being message) to nilweb.log.access::error-buffer
+    when (the length of nilweb.log.access::error-buffer) is at least buffer-limit then
+        evaluate flush-now with nothing
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- Write everything held. Called by the server when it has nothing to
+!!! serve, and by the buffer ceiling.
+
+public flush-now returns nothing begin paragraph
+    evaluate flush-one with path being nilweb.log.access::access-path, which being "access"
+    evaluate flush-one with path being nilweb.log.access::error-path, which being "error"
+    give nothing
+end paragraph
+
+
+flush-one receives path as text, which as text returns nothing begin paragraph
+    value lines is when which equals "access"
+        give nilweb.log.access::access-buffer
+        otherwise give nilweb.log.access::error-buffer
+    end when
+    when path equals "" or (the length of lines) equals 0 then
+        give nothing
+    end when
+
+    variable block as text is ""
+    repeat for each line in lines
+        set block to block plus line plus newline
+    end repeat
+
+    !!! Cleared before the write, not after. A write that fails must not leave
+    !!! the lines queued for the next attempt: the next attempt will fail the
+    !!! same way, the buffer grows without bound, and a full disk becomes an
+    !!! out-of-memory. They are counted instead.
+    value held is the length of lines
+    evaluate clear-one with which being which
+
+    value written is nil.std.io::append_text with path being path, content being block
+    consider written
+        when Result.Ok holding done then give nothing
+        otherwise set nilweb.log.access::dropped-lines to nilweb.log.access::dropped-lines plus held
+    end consider
+    give nothing
+end paragraph
+
+
+clear-one receives which as text returns nothing begin paragraph
+    variable empty as array of text is []
+    when which equals "access" then
+        set nilweb.log.access::access-buffer to empty
+    otherwise
+        set nilweb.log.access::error-buffer to empty
+    end when
+    give nothing
+end paragraph
+
+
+!!! --- The request line, rebuilt rather than kept.
+!!! From the parsed parts, so what is logged is what the server acted on. A
+!!! log of the raw line would record what the client sent, which is the more
+!!! honest thing to log and also attacker-controlled; this records the
+!!! decision, and record-malformed covers the case where there was none.
+
+request-line-of receives request as http-request returns text begin paragraph
+    give (method-name with verb being request.verb) plus " "
+        plus (one-line with raw being request.target) plus " " plus request.version
+end paragraph
+
+
+!!! --- A field value for a log line, or "-" when it is absent.
+
+shown receives raw as text returns text begin paragraph
+    value cleaned is one-line with raw being raw
+    give when cleaned equals "" give "-" otherwise give cleaned end when
+end paragraph
+
+
+!!! --- Strip what would break the format or forge a line.
+!!!
+!!! A header value is attacker-controlled. A newline in it would end the log
+!!! line and start one of the attacker's choosing — a forged entry in a file
+!!! someone will later read as evidence. A quote would close the quoted field
+!!! early and do the same to a parser. Both are replaced rather than escaped,
+!!! because every reader of this format already handles neither.
+!!!
+!!! A control byte is dropped too: a log read in a terminal should not be able
+!!! to move the cursor or set a colour.
+
+public one-line receives raw as text returns text begin paragraph
+    !!! Scanned before it is rebuilt, and almost never rebuilt.
+    !!!
+    !!! Appending a byte at a time grows a new text on every step, so a
+    !!! rebuild is quadratic in the length of the value. Nearly every header
+    !!! is already clean, so the common path is a scan that allocates nothing
+    !!! and gives the input back.
+    !!!
+    !!! This did NOT show up as a throughput gain when it was measured: 291
+    !!! requests a second either way, because the values a benchmark sends are
+    !!! short and the quadratic term never bites. It is kept for the long
+    !!! values a real client sends -- a 150-character user-agent, a referer
+    !!! with a query -- and not on the strength of a measurement it did not
+    !!! earn.
+    when not (needs-cleaning with raw being raw) then
+        give nil.std.text::trim with s being raw
+    end when
+
+    value width is nil.std.text::length with s being raw
+    variable out as text is ""
+    variable index as number is 0
+    repeat while index is less than width
+        value code is nil.std.text::byte_at with s being raw, index being index
+        when byte-is-safe with code being code then
+            set out to out plus (nil.std.text::from_byte with code being code)
+        otherwise
+            !!! One space per removed byte, so a value's length is not changed
+            !!! by sanitising it and a reader cannot be misled about how long
+            !!! the original was.
+            set out to out plus " "
+        end when
+        set index to index plus 1
+    end repeat
+    give nil.std.text::trim with s being out
+end paragraph
+
+
+needs-cleaning receives raw as text returns boolean begin paragraph
+    value width is nil.std.text::length with s being raw
+    variable index as number is 0
+    repeat while index is less than width
+        when not (byte-is-safe with code being
+            (nil.std.text::byte_at with s being raw, index being index)) then
+            give true
+        end when
+        set index to index plus 1
+    end repeat
+    give false
+end paragraph
+
+
+!!! --- Whether a byte may appear in a log field.
+!!!
+!!! A quote would close a quoted field early and a backslash would be read as
+!!! an escape by a parser expecting one; both let an attacker end a field. A
+!!! newline ends the whole line and starts one of their choosing -- a forged
+!!! entry in a file someone will read as evidence. A control byte can move a
+!!! terminal's cursor or set a colour, and a log is read in a terminal.
+
+byte-is-safe receives code as number returns boolean begin paragraph
+    give code is at least 32 and code does not equal 127
+        and code does not equal 34 and code does not equal 92
+end paragraph

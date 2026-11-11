@@ -10,8 +10,8 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-Built and tested end to end — 330 checks, all passing, and a server that holds
-many connections at once.
+Built and tested end to end — 614 checks, all passing, and a server that holds
+many connections at once and logs what it served.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -29,10 +29,12 @@ many connections at once.
 | `nilweb.static.files` | serving a directory, with the traversal checks | done |
 | `nilweb.middleware.chain` | guards before a handler, finishers after | done |
 | `nilweb.server.engine` | the event loop: accepting, framing, keep-alive | done |
+| `nilweb.time.clock` | HTTP dates, log stamps, ISO instants | done |
+| `nilweb.log.access` | Combined Log Format access log, error log | done |
 
 ```sh
 ./scripts/serve.sh   # a real server on 127.0.0.1:8080
-./scripts/test.sh    # 330 checks
+./scripts/test.sh    # 614 checks
 ./scripts/demo.sh    # the same requests, printed instead of served
 ```
 
@@ -65,6 +67,8 @@ errors. Per route, at 16 connections:
 | 317 | `/` | template with a layout and a partial |
 | 274 | `/posts` | the same with a loop |
 | 243 | `/assets/app.css` | a file, with validators |
+
+With logging on, each of those drops by roughly a fifth; see Logs below.
 
 That is a tree-walking interpreter rendering templates, so it is not Apache's
 number. It is the shape that matters: adding connections does not add latency
@@ -113,10 +117,56 @@ were filled in: `nil.std.net.socket` with `poll`, non-blocking transfer and
 `from_byte`; and `nil.std.io`'s `modified_at`. See the framework's
 [socket reference](https://github.com/exec-software/exec-nil-framework/blob/master/docs/standard-library/sockets.md).
 
+## Logs
+
+The Combined Log Format, which is Apache's and nginx's, so anything that reads
+a web server's log already reads this one:
+
+```
+127.0.0.1:54321 - - [06/Nov/1994:08:49:37 +0000] "GET /posts?page=2 HTTP/1.1" 200 1234 "http://example.com/from" "curl/8.5.0"
+```
+
+`NILWEB_ACCESS_LOG` and `NILWEB_ERROR_LOG` turn them on. Off by default,
+because a framework that starts writing files into whatever directory it was
+launched from fills a disk on someone's laptop.
+
+**Buffered, and flushed when the server is idle.** `nil.std.io`'s only
+appending call opens, writes and closes, which is three syscalls per request on
+the hot path, and the handle API that would avoid them is private and takes raw
+byte buffers a Matrix page cannot build. So lines are held and written in
+batches — on an idle pass, which the loop already detects, or when 64 have
+accumulated. The cost is a window: lines buffered when the process dies are
+lost. That is the trade the available I/O imposes, and `flush-now` is there for
+anything that would rather pay the syscalls.
+
+**A log line cannot be forged.** Header values are attacker-controlled, and a
+newline in one would end the line and start another of the attacker's
+choosing — a fabricated entry in a file someone will later read as evidence. A
+quote would close a field early and do the same to a parser; a control byte
+would move a terminal's cursor or set a colour. All are replaced with a space,
+one space per byte so the length a reader sees is not changed by sanitising. A
+malformed request logs a dash where its request line would be, rather than its
+bytes.
+
+**Logging costs about a fifth of the request rate** — 366 req/s becomes 291.
+One cause was found and fixed: the loop was parsing every request twice, once
+for the log and once inside `answer`, which was worth 270 → 309 on its own.
+The remaining fifth is not accounted for. Two likely-looking fixes — a
+clean-path scan instead of a byte-by-byte rebuild, and caching the formatted
+timestamp per second — both measured at no change, so they are kept on their
+merits for long inputs rather than credited with a gain they did not produce.
+
 ## Static files
 
 Served with the three things a static file server is expected to do about not
 re-sending what the client already has.
+
+**`Last-Modified` and `If-Modified-Since`**, compared at second resolution,
+because an HTTP date has no finer one — a file written 300ms after the second
+the client was told would otherwise look modified on every request forever. An
+unreadable date counts as modified and gets the full representation, which is
+always correct; reading a date wrongly and answering 304 serves a stale page,
+which is the failure that matters.
 
 **ETag and `If-None-Match`.** The tag is built from size and modification time
 — what Apache does by default, and sound for the same reason: a file whose
@@ -137,6 +187,14 @@ avoids a multipart body for a case almost nothing sends.
 absolute names, drive letters, backslashes, doubled separators, null bytes and
 dotfiles. An unknown extension is `application/octet-stream` and never
 `text/html`, because a browser told something is HTML will run the script in it.
+
+The dates come from `nilweb.time.clock`, which turns epoch milliseconds into
+HTTP's date format, the Common Log Format stamp and an ISO instant. The
+calendar arithmetic is Hinnant's `civil_from_days`, written out rather than
+approximated, and its 260 test expectations were generated from a different
+calendar implementation over leap days, century non-leap years and forty random
+instants — calendar code that is wrong one day in four years looks right in
+every test written in the other three.
 
 ## Templates are cached
 
@@ -260,6 +318,8 @@ src/nilweb/session/session.matrix    sessions and their cookie
 src/nilweb/static/files.matrix       serving a directory
 src/nilweb/middleware/chain.matrix   guards and finishers
 src/nilweb/server/engine.matrix      the event loop
+src/nilweb/time/clock.matrix         HTTP dates, log stamps, ISO instants
+src/nilweb/log/access.matrix         access and error logs
 src/main.matrix                      a demonstration, and the `answer` entry point
 web/                                 the demonstration's templates and assets
 tests/run-tests.matrix               every suite
