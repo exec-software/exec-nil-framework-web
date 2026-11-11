@@ -33,13 +33,22 @@ read everything from nilweb.middleware.chain
 read everything from nilweb.server.engine
 read everything from nilweb.time.clock
 read everything from nilweb.log.access
+read everything from nilweb.config.settings
 read nil.std.system.environment
 
 
-!!! Where the templates and the public files live, relative to the working
-!!! directory the program is started in.
-constant template-root as text is "web"
-constant public-root as text is "web/public"
+!!! The running configuration, and the site a request is being answered for.
+!!!
+!!! Book globals rather than arguments threaded through every handler. The
+!!! alternative is one more parameter on `answer-parsed`, `page-shell`,
+!!! `rendered-page` and each page, which is five signatures changed so that
+!!! one of them can read a path. A single-threaded server has one active
+!!! request at a time, so there is nothing here for a second one to race with
+!!! — and if that ever stops being true, this is the thing that has to change.
+public variable active-settings is default-settings with nothing
+public variable active-site is build site with host being "", template-root being "web",
+    public-root being "web/public", index-page being ""
+
 constant site-name as text is "nil-web"
 
 
@@ -84,6 +93,18 @@ end paragraph
 !!! throughput. Measured, not guessed: 422 req/s became 270.
 
 public answer-parsed receives request as http-request returns text begin paragraph
+    !!! Which site answers, decided once per request from the Host header. A
+    !!! Host nothing is configured for is refused rather than served from
+    !!! whichever site happens to be first, because that is how one tenant
+    !!! ends up reading another's pages.
+    when request.well-formed then
+        set nilweb.main::active-site to site-for with held-settings being nilweb.main::active-settings,
+            host-header being (host-of with request being request)
+        when (nilweb.main::active-site).template-root equals "" then
+            give render-response with response being (error-response with code being status-not-found,
+                explanation being "No site is configured for that host"), verb being request.verb
+        end when
+    end when
     when not request.well-formed then
         give render-for-get with response being
             (error-response with code being status-bad-request, explanation being request.complaint)
@@ -157,7 +178,8 @@ end paragraph
 !!! renders its first half and then stops is the hardest kind of bug to see.
 
 rendered-page receives name as text, page-data as render-context returns http-response begin paragraph
-    value outcome is render-file with name being name, page-data being page-data, root being template-root
+    value outcome is render-file with name being name, page-data being page-data,
+        root being (nilweb.main::active-site).template-root
     when not outcome.rendered then
         give error-response with code being status-internal-error,
             explanation being "Template " plus name plus ": " plus outcome.complaint
@@ -213,8 +235,8 @@ end paragraph
 !!! back instead of the file.
 asset-file receives request as http-request, found as route-result returns http-response begin paragraph
     value rest is capture-of with result being found, name being "rest"
-    give serve-static with root being public-root, path being "assets/" plus rest,
-        request being request, seconds being 3600
+    give serve-static with root being (nilweb.main::active-site).public-root,
+        path being "assets/" plus rest, request being request, seconds being 3600
 end paragraph
 
 
@@ -268,13 +290,17 @@ constant connection-ceiling as number is 1024
 !!! idle sweep runs promptly, long enough that an idle server is idle.
 constant pass-timeout-ms as number is 1000
 
-serve receives host as text, port as number, share as boolean returns number begin paragraph
-    variable server is start-engine with host being host, port being port, limit being connection-ceiling
+serve receives held-settings as settings returns number begin paragraph
+    set nilweb.main::active-settings to held-settings
+    value host is held-settings.host
+    value port is held-settings.port
+    variable server is start-engine with host being host, port being port,
+        limit being held-settings.connection-limit
     when not server.live then
         say "nil-web could not listen: " plus server.complaint
         give 1
     end when
-    when share then
+    when held-settings.share-port then
         value sharing is share-port with server being server
         when not sharing then
             say "nil-web could not share the port; running alone."
@@ -282,17 +308,19 @@ serve receives host as text, port as number, share as boolean returns number beg
     end when
 
     !!! Frozen while serving: a template does not change under a running
-    !!! server, and frozen means a page costs no filesystem call at all. Set
-    !!! NILWEB_RELOAD to leave it thawed while editing templates.
-    value reloading is nil.std.system::get_environment_variable with name being "NILWEB_RELOAD"
-    consider reloading
-        when Option.Some holding wanted then
-            evaluate freeze-cache with frozen being (wanted equals "")
-        otherwise evaluate freeze-cache with frozen being true
-    end consider
+    !!! server, and frozen means a page costs no filesystem call at all.
+    evaluate freeze-cache with frozen being not held-settings.reload-templates
 
-    evaluate set-up-logging with nothing
+    evaluate log-to with access-file being held-settings.access-log,
+        error-file being held-settings.error-log
+    when not (held-settings.access-log equals "") then
+        say "access log: " plus held-settings.access-log
+    end when
+    when not (held-settings.error-log equals "") then
+        say "error log: " plus held-settings.error-log
+    end when
     say "nil-web listening on " plus (address-text with host being host, port being port)
+    say (((the length of held-settings.sites) becomes text)) plus " site(s) configured."
     say "Ctrl-C to stop."
 
     repeat forever
@@ -366,21 +394,50 @@ body-length-in receives response-text as text returns number begin paragraph
 end paragraph
 
 
-!!! --- Where the logs go, from the environment. Off unless asked, because a
-!!! framework that starts writing files into whatever directory it was
-!!! launched from fills a disk on someone's laptop.
+!!! --- The configuration actually used: the file, then the environment.
+!!!
+!!! The file is the record of intent and belongs in version control. The
+!!! environment overrides it, because a container or a test run needs to
+!!! change one value without editing a file it does not own — and because that
+!!! is the order every other server does it in, so nobody has to find out.
 
-set-up-logging returns nothing begin paragraph
-    value access-file is environment-text with name being "NILWEB_ACCESS_LOG"
-    value error-file is environment-text with name being "NILWEB_ERROR_LOG"
-    evaluate log-to with access-file being access-file, error-file being error-file
-    when not (access-file equals "") then
-        say "access log: " plus access-file
+chosen-settings returns settings begin paragraph
+    value named is environment-text with name being "NILWEB_CONFIG"
+    value path is when named equals ""
+        give (when nil.std.io::exists with path being "nil.web.nildata" give "nil.web.nildata" otherwise give "" end when)
+        otherwise give named
     end when
-    when not (error-file equals "") then
-        say "error log: " plus error-file
+
+    variable held is load-settings with path being path
+    when not held.loaded then
+        !!! Said and then carried on with defaults. Refusing to start would
+        !!! be defensible; what is not defensible is starting while silently
+        !!! ignoring a file somebody wrote.
+        say "nil-web: ignoring the configuration file -- " plus held.complaint
     end when
-    give nothing
+    when not (path equals "") and held.loaded then
+        say "configuration: " plus path
+    end when
+
+    value host-override is environment-text with name being "NILWEB_HOST"
+    value port-override is environment-text with name being "NILWEB_PORT"
+    value access-override is environment-text with name being "NILWEB_ACCESS_LOG"
+    value error-override is environment-text with name being "NILWEB_ERROR_LOG"
+    value share-override is environment-text with name being "NILWEB_SHARE_PORT"
+    value reload-override is environment-text with name being "NILWEB_RELOAD"
+
+    value stated-port is digits-of with digits being port-override
+    give build settings with
+        host being (when host-override equals "" give held.host otherwise give host-override end when),
+        port being (when stated-port is at least 1 give stated-port otherwise give held.port end when),
+        connection-limit being held.connection-limit,
+        access-log being (when access-override equals "" give held.access-log otherwise give access-override end when),
+        error-log being (when error-override equals "" give held.error-log otherwise give error-override end when),
+        share-port being (held.share-port or not (share-override equals "")),
+        reload-templates being (held.reload-templates or not (reload-override equals "")),
+        sites being held.sites,
+        loaded being held.loaded,
+        complaint being held.complaint
 end paragraph
 
 
@@ -419,47 +476,6 @@ with-connection-header receives response-text as text, keeping as boolean return
 end paragraph
 
 
-!!! --- The port to serve on, from NILWEB_PORT, defaulting to 8080.
-
-!!! --- The address to bind. Loopback unless NILWEB_HOST says otherwise,
-!!! because a server that reaches the network by default is one that reached
-!!! the café wifi before anyone decided it should.
-
-chosen-host returns text begin paragraph
-    value stated is nil.std.system::get_environment_variable with name being "NILWEB_HOST"
-    consider stated
-        when Option.Some holding text-held then
-            give when text-held equals "" give "127.0.0.1" otherwise give text-held end when
-        otherwise give "127.0.0.1"
-    end consider
-end paragraph
-
-
-!!! --- Whether to share the port with sibling processes, for more than one
-!!! core. Off unless asked, because two servers quietly splitting traffic is
-!!! worse than one refusing to start.
-
-wants-shared-port returns boolean begin paragraph
-    value stated is nil.std.system::get_environment_variable with name being "NILWEB_SHARE_PORT"
-    consider stated
-        when Option.Some holding text-held then give not (text-held equals "")
-        otherwise give false
-    end consider
-end paragraph
-
-
-chosen-port returns number begin paragraph
-    value stated is nil.std.system::get_environment_variable with name being "NILWEB_PORT"
-    consider stated
-        when Option.Some holding text-held then begin block
-            value parsed is digits-of with digits being text-held
-            give when parsed is at least 1 give parsed otherwise give 8080 end when
-        end block
-        otherwise give 8080
-    end consider
-end paragraph
-
-
 digits-of receives digits as text returns number begin paragraph
     value width is nil.std.text::length with s being digits
     when width is less than 1 or width is greater than 5 then
@@ -487,15 +503,14 @@ main returns number begin paragraph
     consider serving
         when Option.Some holding wanted then begin block
             when not (wanted equals "") then
-                give serve with host being (chosen-host with nothing),
-                    port being (chosen-port with nothing), share being (wants-shared-port with nothing)
+                give serve with held-settings being (chosen-settings with nothing)
             end when
         end block
         otherwise say ""
     end consider
 
     say "nil-web demonstration: requests in, responses out."
-    say "Set NILWEB_SERVE=1 to serve (NILWEB_HOST, NILWEB_PORT, NILWEB_SHARE_PORT)."
+    say "Set NILWEB_SERVE=1 to serve. Configuration: nil.web.nildata, or NILWEB_CONFIG."
 
     evaluate show with title being "GET / (template, layout, partial)",
         raw being (wire-request with line being "GET / HTTP/1.1", fields being "Host: localhost", body being "")

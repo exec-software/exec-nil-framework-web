@@ -10,8 +10,8 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-Built and tested end to end — 614 checks, all passing, and a server that holds
-many connections at once and logs what it served.
+Built and tested end to end — 653 checks, all passing. A server that holds many
+connections at once, serves several sites from one port, and logs what it did.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -31,10 +31,11 @@ many connections at once and logs what it served.
 | `nilweb.server.engine` | the event loop: accepting, framing, keep-alive | done |
 | `nilweb.time.clock` | HTTP dates, log stamps, ISO instants | done |
 | `nilweb.log.access` | Combined Log Format access log, error log | done |
+| `nilweb.config.settings` | a nildata config file, and virtual hosts | done |
 
 ```sh
 ./scripts/serve.sh   # a real server on 127.0.0.1:8080
-./scripts/test.sh    # 614 checks
+./scripts/test.sh    # 653 checks
 ./scripts/demo.sh    # the same requests, printed instead of served
 ```
 
@@ -116,6 +117,58 @@ were filled in: `nil.std.net.socket` with `poll`, non-blocking transfer and
 `SO_REUSEPORT`; `nil.std.security.random`; `nil.std.text`'s `byte_at` and
 `from_byte`; and `nil.std.io`'s `modified_at`. See the framework's
 [socket reference](https://github.com/exec-software/exec-nil-framework/blob/master/docs/standard-library/sockets.md).
+
+## Configuration and virtual hosts
+
+A `nil.web.nildata` file, overridden by the environment. nildata rather than
+JSON or a format of our own, because it is the framework's own:
+`nil.project.nildata` describes a build, so `nil.web.nildata` describing a
+server needs no new parser, no new tooling and nothing to learn.
+
+```
+nildata 1
+object
+  schema is "nil.web.v1"
+  host is "127.0.0.1"
+  port is 8080
+  connectionLimit is 1024
+  accessLog is ""
+  sites is an array
+    item is an object
+      host is "one.example"
+      templateRoot is "sites/one"
+      publicRoot is "sites/one/public"
+    end object
+    item is an object
+      templateRoot is "web"
+    end object
+  end array
+end object
+```
+
+The file is the record of intent and belongs in version control; the
+environment overrides it, because a container or a test run needs to change one
+value without editing a file it does not own. `NILWEB_CONFIG` names the file,
+and `NILWEB_HOST`, `NILWEB_PORT`, `NILWEB_ACCESS_LOG`, `NILWEB_ERROR_LOG`,
+`NILWEB_SHARE_PORT` and `NILWEB_RELOAD` each override one value.
+
+**Everything has a default and a missing file is not an error** — a server that
+will not start without a config file is one nobody can try out. A file that is
+*there* and will not parse is a different matter: it is said plainly and the
+defaults are used, because starting while silently ignoring a file somebody
+wrote is worse than either refusing or obeying.
+
+**An unknown schema is refused rather than read hopefully.** A file declaring a
+version this does not know may mean something different by the same key names,
+and guessing is how a server ends up listening somewhere nobody asked for.
+
+**Sites are matched on `Host`**, with the port stripped and the case folded,
+each with its own template and public roots. A site with no `host` is the
+default; **without one, an unknown `Host` is a 404 rather than whichever site
+happens to be first** — which is how one tenant ends up reading another's
+pages. There is deliberately no wildcard matching: `*.example.com` looks
+helpful and is the shape that serves the wrong tenant when a subdomain is added
+and nobody re-reads the config.
 
 ## Logs
 
@@ -320,6 +373,8 @@ src/nilweb/middleware/chain.matrix   guards and finishers
 src/nilweb/server/engine.matrix      the event loop
 src/nilweb/time/clock.matrix         HTTP dates, log stamps, ISO instants
 src/nilweb/log/access.matrix         access and error logs
+src/nilweb/config/settings.matrix    the config file and virtual hosts
+nil.web.nildata                      the example configuration
 src/main.matrix                      a demonstration, and the `answer` entry point
 web/                                 the demonstration's templates and assets
 tests/run-tests.matrix               every suite

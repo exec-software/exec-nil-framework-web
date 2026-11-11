@@ -22,6 +22,7 @@ read everything from nilweb.middleware.chain
 read everything from nilweb.server.engine
 read everything from nilweb.time.clock
 read everything from nilweb.log.access
+read everything from nilweb.config.settings
 
 scan-tests returns nothing begin paragraph
     evaluate section with title being "nilweb.text.scan"
@@ -1391,6 +1392,118 @@ shown-for receives raw as text returns text begin paragraph
     give when cleaned equals "" give "-" otherwise give cleaned end when
 end paragraph
 
+config-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.config.settings"
+    value fallback-settings is default-settings with nothing
+    evaluate same-text with label being "the default host is loopback", actual being fallback-settings.host, expected being "127.0.0.1"
+    evaluate same-number with label being "the default port is 8080", actual being fallback-settings.port, expected being 8080
+    evaluate is-true with label being "logging is off by default", actual being fallback-settings.access-log equals ""
+    evaluate same-number with label being "there is one default site", actual being the length of fallback-settings.sites, expected being 1
+
+    !!! Not naming a file and naming one that is absent are the same
+    !!! intention, and neither is a failure.
+    evaluate is-true with label being "no config file is not a failure",
+        actual being (load-settings with path being "").loaded
+    evaluate is-true with label being "an absent config file is not a failure",
+        actual being (load-settings with path being "tests/no-such.nildata").loaded
+    evaluate same-number with label being "an absent file keeps the default port",
+        actual being (load-settings with path being "tests/no-such.nildata").port, expected being 8080
+
+    value held is load-settings with path being "tests/sample.nildata"
+    evaluate is-true with label being "a config file loads", actual being held.loaded
+    evaluate same-text with label being "the host is read", actual being held.host, expected being "0.0.0.0"
+    evaluate same-number with label being "the port is read", actual being held.port, expected being 9443
+    evaluate same-number with label being "the connection limit is read", actual being held.connection-limit, expected being 4096
+    evaluate same-text with label being "the access log path is read", actual being held.access-log, expected being "logs/access.log"
+    evaluate same-text with label being "the error log path is read", actual being held.error-log, expected being "logs/error.log"
+    evaluate is-true with label being "a boolean is read", actual being held.share-port
+    evaluate is-true with label being "a second boolean is read", actual being held.reload-templates
+    evaluate same-number with label being "every site is read", actual being the length of held.sites, expected being 3
+
+    !!! Virtual hosts.
+    value first-site is site-for with held-settings being held, host-header being "example.com"
+    evaluate same-text with label being "a site is matched by Host", actual being first-site.template-root, expected being "sites/example"
+    evaluate same-text with label being "its public root is read", actual being first-site.public-root, expected being "sites/example/static"
+    evaluate same-text with label being "its index page is read", actual being first-site.index-page, expected being "index.nilhtml"
+    evaluate same-text with label being "a Host match folds case",
+        actual being (site-for with held-settings being held, host-header being "EXAMPLE.com").template-root,
+        expected being "sites/example"
+    evaluate same-text with label being "a port on the Host is ignored",
+        actual being (site-for with held-settings being held, host-header being "example.com:8080").template-root,
+        expected being "sites/example"
+    evaluate same-text with label being "a second site is matched",
+        actual being (site-for with held-settings being held, host-header being "other.test").template-root,
+        expected being "sites/other"
+    evaluate same-text with label being "a site with no publicRoot derives one",
+        actual being (site-for with held-settings being held, host-header being "other.test").public-root,
+        expected being "sites/other/public"
+    evaluate same-text with label being "an unknown Host falls back to the default site",
+        actual being (site-for with held-settings being held, host-header being "nobody.invalid").template-root,
+        expected being "sites/fallback"
+    evaluate same-text with label being "an empty Host falls back to the default site",
+        actual being (site-for with held-settings being held, host-header being "").template-root,
+        expected being "sites/fallback"
+    evaluate is-true with label being "a wildcard is not matched as one",
+        actual being not ((site-for with held-settings being held,
+            host-header being "anything.example.com").template-root equals "sites/example")
+
+    !!! Host parsing, including the IPv6 literal that a naive split breaks on.
+    evaluate same-text with label being "a bare host is itself",
+        actual being (host-only with header being "example.com"), expected being "example.com"
+    evaluate same-text with label being "a port is stripped",
+        actual being (host-only with header being "example.com:8080"), expected being "example.com"
+    evaluate same-text with label being "an IPv6 literal keeps its brackets and colons",
+        actual being (host-only with header being "[2001:db8::1]:8080"), expected being "[2001:db8::1]"
+    evaluate same-text with label being "an IPv6 literal with no port survives",
+        actual being (host-only with header being "[::1]"), expected being "[::1]"
+    evaluate same-text with label being "a host is folded",
+        actual being (host-only with header being "Example.COM"), expected being "example.com"
+
+    !!! A site list with no default refuses an unknown Host rather than
+    !!! serving another tenant's files.
+    value only-named is settings-from with source being
+        begin text
+        nildata 1
+        object
+          schema is "nil.web.v1"
+          sites is an array
+            item is an object
+              host is "one.test"
+              templateRoot is "one"
+            end object
+          end array
+        end object
+        end text
+    evaluate is-true with label being "a named site is found", actual being (has-site with held-settings being only-named, host-header being "one.test")
+    evaluate is-true with label being "an unknown Host with no default site is refused",
+        actual being not (has-site with held-settings being only-named, host-header being "two.test")
+
+    !!! A file somebody wrote and meant something by, that will not parse, is
+    !!! a failure. An unknown schema is refused rather than read hopefully.
+    value broken is load-settings with path being "tests/broken.nildata"
+    evaluate is-true with label being "a malformed config file is a failure", actual being not broken.loaded
+    evaluate is-true with label being "a malformed config file says why", actual being not (broken.complaint equals "")
+    evaluate same-number with label being "a malformed config still yields usable defaults", actual being broken.port, expected being 8080
+    value wrong-schema is load-settings with path being "tests/bad-schema.nildata"
+    evaluate is-true with label being "an unknown schema is refused", actual being not wrong-schema.loaded
+    evaluate is-true with label being "an unknown schema does not take the file's port",
+        actual being not (wrong-schema.port equals 1)
+
+    !!! An empty sites array is the same as none at all.
+    value no-sites is settings-from with source being
+        begin text
+        nildata 1
+        object
+          schema is "nil.web.v1"
+          sites is an array
+          end array
+        end object
+        end text
+    evaluate same-number with label being "an empty site list keeps the default site",
+        actual being the length of no-sites.sites, expected being 1
+    give nothing
+end paragraph
+
 main returns number begin paragraph
     say "nilweb tests"
     evaluate scan-tests with nothing
@@ -1408,5 +1521,6 @@ main returns number begin paragraph
     evaluate listener-tests with nothing
     evaluate clock-tests with nothing
     evaluate log-tests with nothing
+    evaluate config-tests with nothing
     give verdict with nothing
 end paragraph

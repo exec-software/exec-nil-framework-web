@@ -1,0 +1,26 @@
+nildata 1
+object
+  schema is "nil.web.v1"
+  host is "0.0.0.0"
+  port is 9443
+  connectionLimit is 4096
+  accessLog is "logs/access.log"
+  errorLog is "logs/error.log"
+  sharePort is true
+  reloadTemplates is true
+  sites is an array
+    item is an object
+      host is "Example.COM"
+      templateRoot is "sites/example"
+      publicRoot is "sites/example/static"
+      indexPage is "index.nilhtml"
+    end object
+    item is an object
+      host is "other.test"
+      templateRoot is "sites/other"
+    end object
+    item is an object
+      templateRoot is "sites/fallback"
+    end object
+  end array
+end object

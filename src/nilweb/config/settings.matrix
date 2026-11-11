@@ -1,0 +1,333 @@
+!!! Configuration, and the sites a server answers for.
+!!!
+!!! A server configured only by environment variables is a server nobody can
+!!! review: there is no file to put in version control, no way to describe two
+!!! sites, and no record of what the running process was told. This reads a
+!!! nildata file.
+!!!
+!!! nildata rather than JSON or a format of our own, because it is the
+!!! framework's own: `nil.project.nildata` describes a build, so
+!!! `nil.web.nildata` describing a server needs no new parser, no new tooling
+!!! and nothing to learn.
+!!!
+!!! Everything has a default and a missing file is not an error. A server that
+!!! will not start without a config file is one that cannot be tried out, and
+!!! the defaults here are the ones a developer wants: loopback, port 8080, one
+!!! site, no logs.
+!!!
+!!! Every nildata call here spells its first argument `` `value` ``. That is
+!!! not a style choice: the Ny declaration names the parameter `value`, which
+!!! is a Matrix keyword, so a backtick escape is the only way to call it by
+!!! name. Worth knowing before writing the next one.
+
+book nilweb.config.settings
+
+read nil.std.core
+read nil.std.io.file
+read nil.std.nildata
+read nil.std.text
+read nil.std.text.string_utils
+read everything from nilweb.text.scan
+
+
+!!! One site: which Host it answers for, and where its files are.
+!!!
+!!! A `host` of "" is the default site, used when no other matches. Without
+!!! one, a request for an unknown Host is refused — which is the right answer
+!!! for a server with several sites on one address, and the wrong one for a
+!!! server with a single site reached by IP as well as by name.
+
+public site begin record
+    field host as text
+    field template-root as text
+    field public-root as text
+    !!! Served for a request whose path names a directory. Empty means no
+    !!! directory index: a request for "/" then has to be a route.
+    field index-page as text
+end record
+
+
+public settings begin record
+    field host as text
+    field port as number
+    field connection-limit as number
+    field access-log as text
+    field error-log as text
+    field share-port as boolean
+    field reload-templates as boolean
+    field sites as array of site
+    !!! False when a file was named and could not be read or parsed. The
+    !!! defaults are still filled in, so a caller may serve anyway — but it
+    !!! should say what it ignored first.
+    field loaded as boolean
+    field complaint as text
+end record
+
+
+public default-settings returns settings begin paragraph
+    variable sites as array of site is []
+    append build site with host being "", template-root being "web",
+        public-root being "web/public", index-page being "" to sites
+    give build settings with
+        host being "127.0.0.1",
+        port being 8080,
+        connection-limit being 1024,
+        access-log being "",
+        error-log being "",
+        share-port being false,
+        reload-templates being false,
+        sites being sites,
+        loaded being true,
+        complaint being ""
+end paragraph
+
+
+!!! --- Read a configuration file.
+!!!
+!!! An absent file gives the defaults and `loaded` true: not naming a file and
+!!! naming one that is not there are the same intention, and neither is a
+!!! failure. A file that is there and will not parse is a failure, because
+!!! somebody wrote it and meant something by it.
+
+public load-settings receives path as text returns settings begin paragraph
+    when path equals "" then
+        give default-settings with nothing
+    end when
+    when not (nil.std.io::exists with path being path) then
+        give default-settings with nothing
+    end when
+    value loaded is nil.std.io::read_text with path being path
+    consider loaded
+        when Result.Ok holding source then give settings-from with source being source
+        when Result.Error holding why then give refused with complaint being "could not read " plus path plus ": " plus why
+        otherwise give refused with complaint being "could not read " plus path
+    end consider
+end paragraph
+
+
+refused receives complaint as text returns settings begin paragraph
+    value base is default-settings with nothing
+    give build settings with
+        host being base.host, port being base.port, connection-limit being base.connection-limit,
+        access-log being base.access-log, error-log being base.error-log,
+        share-port being base.share-port, reload-templates being base.reload-templates,
+        sites being base.sites, loaded being false, complaint being complaint
+end paragraph
+
+
+!!! --- Parse configuration from nildata text.
+
+public settings-from receives source as text returns settings begin paragraph
+    value base is default-settings with nothing
+    value parsed is nil.std.nildata::loads with source being source
+    consider parsed
+        when Result.Error holding why then give refused with complaint being "the configuration did not parse: " plus why
+        when Result.Ok holding root then begin block
+            value stated-schema is text-at with holder being root, key being "schema", fallback being ""
+            when not (stated-schema equals "") and not (stated-schema equals "nil.web.v1") then
+                !!! Refused rather than read on a best-effort basis. A file
+                !!! declaring a schema this does not know may mean something
+                !!! different by the same key names, and guessing is how a
+                !!! server ends up listening somewhere nobody asked for.
+                give refused with complaint being "unknown configuration schema: " plus stated-schema
+            end when
+            give build settings with
+                host being (text-at with holder being root, key being "host", fallback being base.host),
+                port being (number-at with holder being root, key being "port", fallback being base.port),
+                connection-limit being (number-at with holder being root, key being "connectionLimit",
+                    fallback being base.connection-limit),
+                access-log being (text-at with holder being root, key being "accessLog", fallback being ""),
+                error-log being (text-at with holder being root, key being "errorLog", fallback being ""),
+                share-port being (flag-at with holder being root, key being "sharePort", fallback being false),
+                reload-templates being (flag-at with holder being root, key being "reloadTemplates", fallback being false),
+                sites being (sites-in with root being root, fallback being base.sites),
+                loaded being true,
+                complaint being ""
+        end block
+        otherwise give refused with complaint being "the configuration did not parse"
+    end consider
+end paragraph
+
+
+!!! --- The sites array, or one default site when it is absent or empty.
+
+sites-in receives root as nil.std.nildata.Value, fallback as array of site returns array of site begin paragraph
+    value found is nil.std.nildata::object_get with `value` being root, key being "sites"
+    consider found
+        when Result.Ok holding maybe then begin block
+            consider maybe
+                when Option.Some holding listed then give sites-of with listed being listed, fallback being fallback
+                otherwise give fallback
+            end consider
+        end block
+        otherwise give fallback
+    end consider
+end paragraph
+
+
+sites-of receives listed as nil.std.nildata.Value, fallback as array of site returns array of site begin paragraph
+    value counted is nil.std.nildata::size with `value` being listed
+    variable total as number is 0
+    consider counted
+        when Result.Ok holding amount then set total to amount
+        otherwise set total to 0
+    end consider
+    when total is at most 0 then
+        give fallback
+    end when
+
+    variable out as array of site is []
+    variable index as number is 0
+    repeat while index is less than total
+        value item is nil.std.nildata::array_get with `value` being listed, index being index
+        consider item
+            when Result.Ok holding maybe then begin block
+                consider maybe
+                    when Option.Some holding held then
+                        append (site-of with holder being held) to out
+                    otherwise say ""
+                end consider
+            end block
+            otherwise say ""
+        end consider
+        set index to index plus 1
+    end repeat
+    when (the length of out) equals 0 then
+        give fallback
+    end when
+    give out
+end paragraph
+
+
+site-of receives holder as nil.std.nildata.Value returns site begin paragraph
+    value templates is text-at with holder being holder, key being "templateRoot", fallback being "web"
+    give build site with
+        host being (nil.std.text::to_lower with s being
+            (text-at with holder being holder, key being "host", fallback being "")),
+        template-root being templates,
+        public-root being (text-at with holder being holder, key being "publicRoot",
+            fallback being templates plus "/public"),
+        index-page being (text-at with holder being holder, key being "indexPage", fallback being "")
+end paragraph
+
+
+!!! --- The site that answers for a Host header.
+!!!
+!!! The port is stripped, because "example.com" and "example.com:8080" are the
+!!! same site, and the comparison folds case because a host name is
+!!! case-insensitive. An IPv6 literal in brackets is compared whole.
+!!!
+!!! No wildcard matching. "*.example.com" looks helpful and is the shape that
+!!! ends up serving one tenant's files to another when a subdomain is added
+!!! and nobody re-reads the config; a site that wants several names lists them.
+
+public site-for receives held-settings as settings, host-header as text returns site begin paragraph
+    value wanted is host-only with header being host-header
+    repeat for each one in held-settings.sites
+        when not (one.host equals "") and one.host equals wanted then
+            give one
+        end when
+    end repeat
+    repeat for each one in held-settings.sites
+        when one.host equals "" then
+            give one
+        end when
+    end repeat
+    !!! No match and no default. The caller answers 404 rather than serving
+    !!! some other tenant's site, which is the whole point of the check.
+    give build site with host being "", template-root being "", public-root being "", index-page being ""
+end paragraph
+
+
+public has-site receives held-settings as settings, host-header as text returns boolean begin paragraph
+    value chosen is site-for with held-settings being held-settings, host-header being host-header
+    give not (chosen.template-root equals "")
+end paragraph
+
+
+!!! --- The host part of a Host header, folded, without its port.
+
+public host-only receives header as text returns text begin paragraph
+    value trimmed is nil.std.text::trim with s being header
+    when trimmed equals "" then
+        give ""
+    end when
+    !!! An IPv6 literal is "[::1]:8080"; the brackets have to survive and the
+    !!! colons inside them must not be mistaken for the port separator.
+    when nil.std.text::starts_with with s being trimmed, prefix being "[" then
+        value closing is nil.std.text::index_of with s being trimmed, needle being "]"
+        when closing is less than 0 then
+            give nil.std.text::to_lower with s being trimmed
+        end when
+        give nil.std.text::to_lower with s being
+            (nil.std.text::substring with s being trimmed, start being 0, length being closing plus 1)
+    end when
+    give nil.std.text::to_lower with s being (before-first with input being trimmed, separator being ":")
+end paragraph
+
+
+!!! --- nildata accessors, each giving a fallback rather than a Result.
+!!!
+!!! Configuration reading is the one place where a missing key is ordinary and
+!!! a wrong type is close to it, and threading a Result through every field
+!!! would make the settings record above unreadable. A malformed value takes
+!!! the default; a malformed *file* was already refused above.
+
+text-at receives holder as nil.std.nildata.Value, key as text, fallback as text returns text begin paragraph
+    value found is nil.std.nildata::object_get with `value` being holder, key being key
+    consider found
+        when Result.Ok holding maybe then begin block
+            consider maybe
+                when Option.Some holding held then begin block
+                    value shown is nil.std.nildata::text_value with `value` being held
+                    consider shown
+                        when Result.Ok holding out then give out
+                        otherwise give fallback
+                    end consider
+                end block
+                otherwise give fallback
+            end consider
+        end block
+        otherwise give fallback
+    end consider
+end paragraph
+
+
+number-at receives holder as nil.std.nildata.Value, key as text, fallback as number returns number begin paragraph
+    value found is nil.std.nildata::object_get with `value` being holder, key being key
+    consider found
+        when Result.Ok holding maybe then begin block
+            consider maybe
+                when Option.Some holding held then begin block
+                    value amount is nil.std.nildata::as_i64 with `value` being held
+                    consider amount
+                        when Result.Ok holding out then give out
+                        otherwise give fallback
+                    end consider
+                end block
+                otherwise give fallback
+            end consider
+        end block
+        otherwise give fallback
+    end consider
+end paragraph
+
+
+flag-at receives holder as nil.std.nildata.Value, key as text, fallback as boolean returns boolean begin paragraph
+    value found is nil.std.nildata::object_get with `value` being holder, key being key
+    consider found
+        when Result.Ok holding maybe then begin block
+            consider maybe
+                when Option.Some holding held then begin block
+                    value held-flag is nil.std.nildata::bool_value with `value` being held
+                    consider held-flag
+                        when Result.Ok holding out then give out
+                        otherwise give fallback
+                    end consider
+                end block
+                otherwise give fallback
+            end consider
+        end block
+        otherwise give fallback
+    end consider
+end paragraph

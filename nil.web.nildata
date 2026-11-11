@@ -1,0 +1,41 @@
+nildata 1
+object
+  schema is "nil.web.v1"
+
+  # The address to bind. Loopback here on purpose: a server that reaches the
+  # network by default is one that reached the cafe wifi before anyone
+  # decided it should. Empty, or "0.0.0.0", means every interface.
+  host is "127.0.0.1"
+  port is 8080
+
+  # How many connections may be open at once. Every one holds its
+  # accumulated request, so this is a memory ceiling as much as a load one.
+  connectionLimit is 1024
+
+  # Off by default. A path here turns the log on; see the README for the
+  # format and for what buffering costs.
+  accessLog is ""
+  errorLog is ""
+
+  # Share the port with sibling processes, for more than one core. Leave it
+  # off unless you are running several: switched on by accident it splits
+  # traffic with a stray server rather than failing to start.
+  sharePort is false
+
+  # Check each template's timestamp per render. Off means a page costs no
+  # filesystem call at all; on means an edited template appears without a
+  # restart. On while writing templates, off while serving.
+  reloadTemplates is false
+
+  # The sites this server answers for, matched on the Host header with the
+  # port stripped and the case folded. There is no wildcard matching: a site
+  # wanting several names lists them. A site with no `host` is the default,
+  # used when nothing else matches; without one, an unknown Host is a 404
+  # rather than whichever site happens to be first.
+  sites is an array
+    item is an object
+      templateRoot is "web"
+      publicRoot is "web/public"
+    end object
+  end array
+end object
