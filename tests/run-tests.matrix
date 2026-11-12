@@ -6,6 +6,7 @@ book nilweb.tests.run
 read everything from nilweb.tests.harness
 read everything from nilweb.tests.sha256
 read everything from nilweb.tests.static_http
+read everything from nilweb.tests.framing
 read nil.std.core
 read nil.std.text
 read everything from nilweb.text.scan
@@ -919,8 +920,8 @@ listener-tests returns nothing begin paragraph
         actual being not (request-is-complete with message being "GET / HTTP/1.1" plus (crlf with nothing) plus "Host: x")
     evaluate is-true with label being "nothing at all is incomplete",
         actual being not (request-is-complete with message being "")
-    evaluate is-true with label being "a bare-LF request is recognised",
-        actual being (request-is-complete with message being "GET / HTTP/1.1" plus newline plus "Host: x"
+    evaluate is-true with label being "a bare-LF request is rejected",
+        actual being not (request-is-complete with message being "GET / HTTP/1.1" plus newline plus "Host: x"
             plus newline plus newline)
 
     value header-part is "POST /f HTTP/1.1" plus (crlf with nothing) plus "Content-Length: 9" plus marker
@@ -933,14 +934,14 @@ listener-tests returns nothing begin paragraph
     evaluate is-true with label being "Content-Length folds case like any field",
         actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
             plus "content-length: 2" plus marker plus "ab")
-    evaluate is-true with label being "a Content-Length that is not a number does not stall the loop",
-        actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
+    evaluate is-true with label being "a nonnumeric Content-Length is not a valid complete frame",
+        actual being not (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
             plus "Content-Length: banana" plus marker)
-    evaluate is-true with label being "a negative Content-Length does not stall the loop",
-        actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
+    evaluate is-true with label being "a negative Content-Length is not a valid complete frame",
+        actual being not (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
             plus "Content-Length: -5" plus marker)
-    evaluate is-true with label being "an absurd Content-Length does not stall the loop",
-        actual being (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
+    evaluate is-true with label being "an oversized Content-Length is not a valid complete frame",
+        actual being not (request-is-complete with message being "POST /f HTTP/1.1" plus (crlf with nothing)
             plus "Content-Length: 99999999999999999999" plus marker)
 
     evaluate same-text with label being "the startup line names a loopback address",
@@ -1523,6 +1524,7 @@ main returns number begin paragraph
     evaluate run-static-http-tests with nothing
     evaluate middleware-tests with nothing
     evaluate listener-tests with nothing
+    evaluate run-framing-tests with nothing
     evaluate clock-tests with nothing
     evaluate log-tests with nothing
     evaluate config-tests with nothing

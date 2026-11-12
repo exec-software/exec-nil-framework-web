@@ -4,12 +4,10 @@
 !!! path is allowed to name — and the ways that decision goes wrong are well
 !!! known enough to enumerate. Each check below is one of them.
 !!!
-!!! The file is read whole into text. That is fine for the stylesheets and
-!!! scripts a page needs and wrong for anything large, and it is what the
-!!! runtime offers: `file.read_text` reads a whole file, and the streaming
-!!! handles exist but there is nothing to stream *to* until there is a socket.
-!!! `maximum-bytes` keeps a large file from being read at all rather than
-!!! pretending it can be served.
+!!! One framework snapshot reads bytes, metadata and a content digest through
+!!! directory-relative handles. No component below the configured root may be
+!!! a symlink or Windows reparse point. The bounded bytes become interpreter
+!!! text in one copy; the response layer is still an interpreter-only API.
 
 book nilweb.static.files
 
@@ -22,7 +20,6 @@ read everything from nilweb.http.status
 read everything from nilweb.http.headers
 read everything from nilweb.http.request
 read everything from nilweb.http.method
-read everything from nilweb.crypto.sha256
 read everything from nilweb.time.clock
 read everything from nilweb.http.response
 
@@ -40,46 +37,49 @@ constant maximum-bytes as number is 2097152
 !!! things that exist — a probe must not be able to tell a file it may not see
 !!! from a file that is not there.
 
-public serve-file receives root as text, path as text returns http-response begin paragraph
+static-read begin record
+    field answer as http-response
+    field marks as validators
+end record
+
+failed-read receives code as number returns static-read begin paragraph
+    value explanation is when code equals status-payload-too-large
+        give "That file is too large to serve" otherwise give "No such file" end when
+    give build static-read with
+        answer being (error-response with code being code, explanation being explanation),
+        marks being (build validators with found being false, width being 0, stamped-at being 0, tag being "")
+end paragraph
+
+read-static receives root as text, path as text returns static-read begin paragraph
     value relative is without-leading-slash with path being path
-    when not (is-safe-name with name being relative) then
-        give error-response with code being status-not-found, explanation being "No such file"
+    when relative equals "" or not (is-safe-name with name being relative) then
+        give failed-read with code being status-not-found
     end when
-    when relative equals "" then
-        give error-response with code being status-not-found, explanation being "No such file"
-    end when
-
-    value full is when root equals "" give relative otherwise give root plus "/" plus relative end when
-    when not (nil.std.io::exists with path being full) then
-        give error-response with code being status-not-found, explanation being "No such file"
-    end when
-
-    value measured is nil.std.io::size with path being full
-    consider measured
-        !!! `begin block` because this arm holds its own `when`: without it
-        !!! the nested conditional reads as the next pattern arm.
-        when Result.Ok holding width then begin block
-            when width is greater than maximum-bytes then
-                give error-response with code being status-payload-too-large,
-                    explanation being "That file is too large to serve"
-            end when
-        end block
-        when Result.Error holding why then
-            give error-response with code being status-not-found, explanation being "No such file"
-        otherwise
-            give error-response with code being status-not-found, explanation being "No such file"
-    end consider
-
-    value outcome is nil.std.io::read_text with path being full
+    value directory is when root equals "" give "." otherwise give root end when
+    value outcome is nil.std.io::read_rooted_snapshot with root being directory,
+        relative being relative, maximum_bytes being maximum-bytes
     consider outcome
-        when Result.Ok holding body then
-            give make-response with code being status-ok,
-                kind being (media-type-of with name being relative), body being body
-        when Result.Error holding why then
-            give error-response with code being status-not-found, explanation being "No such file"
-        otherwise
-            give error-response with code being status-not-found, explanation being "No such file"
+        when Result.Ok holding snapshot then begin block
+            value body is nil.std.text::from_bytes with data being snapshot.content
+            give build static-read with
+                answer being (make-response with code being status-ok,
+                    kind being (media-type-of with name being relative), body being body),
+                marks being (build validators with found being true,
+                    width being (nil.std.text::length with s being body),
+                    stamped-at being snapshot.modified_ms, tag being quote plus snapshot.sha256 plus quote)
+        end block
+        when Result.Error holding why then begin block
+            when why equals "file.read_rooted_snapshot: input exceeds maximum_bytes" then
+                give failed-read with code being status-payload-too-large
+            end when
+            give failed-read with code being status-not-found
+        end block
+        otherwise give failed-read with code being status-not-found
     end consider
+end paragraph
+
+public serve-file receives root as text, path as text returns http-response begin paragraph
+    give (read-static with root being root, path being path).answer
 end paragraph
 
 
@@ -223,26 +223,7 @@ end record
 !!! that same body; Last-Modified is supplemental, second-resolution metadata.
 
 public validators-of receives root as text, path as text returns validators begin paragraph
-    value answer is serve-file with root being root, path being path
-    when answer.code does not equal status-ok then
-        give build validators with found being false, width being 0, stamped-at being 0, tag being ""
-    end when
-    give validators-for-body with root being root, path being path, body being answer.body
-end paragraph
-
-
-validators-for-body receives root as text, path as text, body as text returns validators begin paragraph
-    value relative is without-leading-slash with path being path
-    value full is when root equals "" give relative otherwise give root plus "/" plus relative end when
-    variable stamped as number is 0 minus 1
-    value timed is nil.std.io::modified_at with path being full
-    consider timed
-        when Result.Ok holding at-ms then set stamped to at-ms
-        otherwise set stamped to 0 minus 1
-    end consider
-    give build validators with found being true,
-        width being (nil.std.text::length with s being body), stamped-at being stamped,
-        tag being quote plus (sha256-hex with data being body) plus quote
+    give (read-static with root being root, path being path).marks
 end paragraph
 
 
@@ -253,9 +234,10 @@ end paragraph
 
 public serve-revalidated receives root as text, path as text, request as http-request,
     seconds as number returns http-response begin paragraph
-    value answer is serve-file with root being root, path being path
+    value loaded is read-static with root being root, path being path
+    value answer is loaded.answer
     when answer.code does not equal status-ok then give answer end when
-    value marks is validators-for-body with root being root, path being path, body being answer.body
+    value marks is loaded.marks
     value full is with-validators with response being answer, marks being marks, seconds being seconds
     when (method-name with verb being request.verb) equals "OPTIONS" then give full end when
 

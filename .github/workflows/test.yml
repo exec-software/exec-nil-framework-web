@@ -1,0 +1,123 @@
+name: Web platform checks
+
+"on":
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+# Build the interpreter and host file boundary from this exact public revision.
+# These jobs qualify source consumers, not a packaged SDK or native networking.
+env:
+  NIL_FRAMEWORK_REVISION: 93515c3d4c2b6e0e7c3b870eb283fce26392d613
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUTF8: '1'
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+
+jobs:
+  web:
+    name: web-${{ matrix.host.name }}
+    runs-on: ${{ matrix.host.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        host:
+          - {name: linux-x86_64, runner: ubuntu-24.04, system: Linux, arch: x86_64, python: python3}
+          - {name: windows-x86_64, runner: windows-2022, system: Windows, arch: x86_64, python: python}
+          - {name: macos-x86_64, runner: macos-15-intel, system: Darwin, arch: x86_64, python: python3}
+          - {name: macos-arm64, runner: macos-15, system: Darwin, arch: arm64, python: python3}
+    defaults:
+      run:
+        shell: bash
+    env:
+      NIL_CI_PYTHON: ${{ matrix.host.python }}
+      NIL_CI_SYSTEM: ${{ matrix.host.system }}
+      NIL_CI_ARCH: ${{ matrix.host.arch }}
+    steps:
+      - name: Check out web
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4, same pin as audit
+        with:
+          path: web
+          persist-credentials: false
+      - name: Check out pinned public framework
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: exec-software/exec-nil-framework
+          ref: ${{ env.NIL_FRAMEWORK_REVISION }}
+          path: framework
+          persist-credentials: false
+      - name: Verify framework revision and prepare evidence
+        timeout-minutes: 2
+        run: |
+          "$NIL_CI_PYTHON" - <<'PY'
+          import json, os, platform, re, subprocess
+          from pathlib import Path
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'web-build-evidence'
+          evidence.mkdir()
+          expected = os.environ['NIL_FRAMEWORK_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}', expected), 'Framework must be pinned to a full commit SHA'
+          actual = subprocess.check_output(['git', '-C', 'framework', 'rev-parse', 'HEAD'], text=True, timeout=15).strip()
+          assert actual == expected
+          report = dict(framework_revision=actual, web_revision=subprocess.check_output(
+              ['git', '-C', 'web', 'rev-parse', 'HEAD'], text=True, timeout=15).strip(),
+              system=platform.system(), machine=platform.machine(), llvm=False, native_database_providers=False)
+          (evidence/'identity.json').write_text(json.dumps(report, indent=2)+'\n')
+          PY
+      - name: Configure focused Release build
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          nil_python_executable="$("$NIL_CI_PYTHON" -c 'import sys; print(sys.executable)')"
+          cmake -S framework -B "$RUNNER_TEMP/web-framework-build" \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DNIL_ENABLE_LLVM=OFF \
+            -DNIL_BUILD_EXPERIMENTAL_TOOLS=OFF \
+            -DNILCOMPILER_SQLITE_INCLUDE_DIR=OFF -DNILCOMPILER_POSTGRESQL_INCLUDE_DIR=OFF \
+            "-DPython3_EXECUTABLE=$nil_python_executable" \
+            2>&1 | tee "$RUNNER_TEMP/web-build-evidence/configure.log"
+      - name: Build compiler interpreter and host contract
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          cmake --build "$RUNNER_TEMP/web-framework-build" --config Release --parallel 2 \
+            --target nilcompiler nilinterpreter nil_rooted_file_snapshot_tests \
+            2>&1 | tee "$RUNNER_TEMP/web-build-evidence/build.log"
+      - name: Run exact web and real loopback contracts
+        timeout-minutes: 8
+        run: |
+          "$NIL_CI_PYTHON" - <<'PY'
+          import os, subprocess, sys
+          from pathlib import Path
+          build = Path(os.environ['RUNNER_TEMP']) / 'web-framework-build'
+          binary = build / 'bin' / 'Release' if os.name == 'nt' else build / 'bin'
+          suffix = '.exe' if os.name == 'nt' else ''
+          command = [sys.executable, '-B', 'web/scripts/test-platform.py',
+              '--compiler', str(binary / ('nilcompiler' + suffix)),
+              '--interpreter', str(binary / ('nilinterpreter' + suffix)),
+              '--host-contract', str(binary / ('nil_rooted_file_snapshot_tests' + suffix)),
+              '--nilstd', str(Path('framework/nilstd/src').resolve()),
+              '--framework-root', str(Path('framework').resolve()),
+              '--framework-revision', os.environ['NIL_FRAMEWORK_REVISION'],
+              '--expected-system', os.environ['NIL_CI_SYSTEM'],
+              '--expected-machine', os.environ['NIL_CI_ARCH'],
+              '--output', str(Path(os.environ['RUNNER_TEMP']) / 'web-platform-results')]
+          subprocess.run(command, check=True, timeout=450)
+          PY
+      - name: Upload complete or partial evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-${{ matrix.host.name }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/web-build-evidence/
+            ${{ runner.temp }}/web-platform-results/evidence/
+          if-no-files-found: error
+          retention-days: 14

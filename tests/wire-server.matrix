@@ -1,0 +1,58 @@
+!!! Owned loopback fixture for scripts/test-http-wire.py. Never a demo server.
+book nilweb.wire.fixture
+
+read nil.std.core
+read nil.std.text
+read nil.std.system.environment
+read everything from nilweb.http.headers
+read everything from nilweb.http.request
+read everything from nilweb.server.engine
+
+main returns number begin paragraph
+    variable port as number is 0
+    value configured is nil.std.system::get_environment_variable with name being "NILWEB_WIRE_PORT"
+    consider configured
+        when Option.Some holding digits then set port to digits becomes number
+        otherwise give 2
+    end consider
+    variable server is start-engine with host being "127.0.0.1", port being port, limit being 32
+    when not server.live then give 3 end when
+    value started is now in milliseconds
+    variable running as boolean is true
+    repeat while running and ((now in milliseconds) minus started) is less than 90000
+        value ready is pump with server being server, timeout being 10
+        when ready.found then
+            value request is parse-request with raw being ready.request
+            value ending is crlf with nothing
+            variable body as text is request.target plus "|" plus request.body
+            when request.target equals "/large" then
+                set body to "x"
+                variable doubling as number is 0
+                repeat while doubling is less than 23
+                    set body to body plus body
+                    set doubling to doubling plus 1
+                end repeat
+            end when
+            !!! Age only the buffered next request, after its bytes have arrived.
+            !!! The reply/drain path must preserve this timestamp, and pump must
+            !!! close it before dispatch. No real clock or process is changed.
+            when request.target equals "/age-next" or request.target equals "/age-soon" then
+                repeat for each held in server.connections
+                    when held.handle equals ready.handle and not (held.gathered equals "") then
+                        value age is when request.target equals "/age-soon" give 19000 otherwise give 21000 end when
+                        set held.started-at to (now in milliseconds) minus age
+                    end when
+                end repeat
+            end when
+            value closing is when ready.keep-alive give "keep-alive" otherwise give "close" end when
+            value response is "HTTP/1.1 200 OK" plus ending plus "Content-Length: "
+                plus ((nil.std.text::length with s being body) becomes text) plus ending
+                plus "Connection: " plus closing plus ending plus ending plus body
+            evaluate reply with server being server, handle being ready.handle,
+                response being response, keep-open being ready.keep-alive
+            when request.target equals "/__shutdown" then set running to false end when
+        end when
+    end repeat
+    evaluate stop-engine with server being server
+    give 0
+end paragraph

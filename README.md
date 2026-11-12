@@ -14,11 +14,11 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-All 764 current checks pass through the NIL interpreter on Linux with framework
-SDK `9fa354d`. This includes content-based validators and HTTP precondition/range
-ordering. The server supports concurrent connections, configuration, virtual
-hosts, and access and error logs. Request framing, filesystem containment and
-large-file hashing still need the work listed below.
+All 1,128 current checks pass through the NIL interpreter on Linux with the
+framework's rooted-file snapshot APIs. Real loopback tests also cover request
+framing, pipelines, binary static content and filesystem-link rejection.
+Four-platform CI builds the pinned framework revision and repeats these checks;
+a source-level pass does not by itself qualify a published SDK.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -33,24 +33,31 @@ large-file hashing still need the work listed below.
 | `nilweb.template.context` | the data a template may read | done |
 | `nilweb.template.render` | `.nilhtml` with layouts, partials, loops, escaping | done |
 | `nilweb.session.session` | a server-side store, secure ids, cookie attributes | done |
-| `nilweb.static.files` | static files, validators and byte ranges | partial; see remaining work |
+| `nilweb.static.files` | rooted static reads, content validators and byte ranges | done within the profile below |
 | `nilweb.middleware.chain` | guards before a handler, finishers after | done |
-| `nilweb.server.engine` | the event loop: accepting, framing, keep-alive | partial; see remaining work |
+| `nilweb.http.framing` | bounded Content-Length/chunked frames and exact pipeline boundaries | done within the profile below |
+| `nilweb.server.engine` | the event loop: accepting, framing, keep-alive | done within the profile below |
 | `nilweb.time.clock` | HTTP dates, log stamps, ISO instants | done |
 | `nilweb.log.access` | Combined Log Format access log, error log | done |
 | `nilweb.config.settings` | a nildata config file, and virtual hosts | done |
 
 ```sh
 ./scripts/serve.sh   # a real server on 127.0.0.1:8080
-./scripts/test.sh    # 764 checks
+./scripts/test.sh    # 1,128 checks
 ./scripts/demo.sh    # the same requests, printed instead of served
 ```
 
 All three take `NIL_SDK` if the framework is not a sibling checkout, and
 `serve.sh` takes `NILWEB_PORT`.
 
-It needs a framework with the socket, entropy and byte intrinsics — the commit
-"Sockets, secure random, and byte access to text" or later.
+It needs a framework with `nil.std.io::read_rooted_snapshot` and
+`nil.std.text::from_bytes`, as well as the socket and entropy APIs. Older SDKs
+without these APIs cannot run this revision. The functional CI workflow pins the
+exact compatible framework source. Build that revision with its
+`scripts/build-sdk.sh` and point `NIL_SDK` at the resulting SDK. Web remains an
+interpreter consumer: native
+text does not yet provide the binary-string contract needed by this response
+layer.
 
 ## Concurrency
 
@@ -112,29 +119,39 @@ standard library's `gzip_compress` is still an unbacked declaration), no
 starts to matter in the thousands; the interface is shaped so `epoll` can
 replace it underneath without callers noticing.
 
-Current code review also identifies these remaining boundaries:
+The current HTTP/1 profile is explicit:
 
-- **Request framing:** malformed `Content-Length` can be treated as a zero-length
-  body, and `Transfer-Encoding` is not validated. Invalid framing needs an
-  explicit rejection and connection closure.
-- **Pipelining:** requests received together are not separated reliably; clearing
-  the input after a response can discard the next request.
-- **Static hashing throughput:** validators now use SHA-256 of the bytes served.
-  The pure Matrix implementation passes known vectors and binary reference
-  checks, but takes about 12 seconds for 1 MiB in the interpreter. It needs a
-  faster runtime path before serving large public assets.
-- **Static-file containment:** textual traversal checks do not keep filesystem
-  links inside the public root. Reads and metadata need a shared, root-constrained
-  filesystem boundary, including intermediate symlinks and Windows junctions.
+- Framing requires CRLF. Identical repeated `Content-Length` values are accepted;
+  malformed or conflicting lengths, and length plus transfer encoding, are
+  rejected with a final response and connection closure. Chunked bodies are
+  decoded within the request cap. Extensions and trailers are validated;
+  trailers are discarded. Other transfer codings receive an explicit rejection.
+- Pipelined requests retain exact message boundaries and surplus bytes across
+  response writes. Partial requests keep a deadline that incoming fragments
+  cannot extend. Half-closing input still permits complete requests to finish.
+- HTTP/1.1 `Expect` requests receive `417` immediately; interim `100 Continue`
+  negotiation is not implemented. Clients may retry without the expectation.
+  HTTP/1.0 `100-continue` is ignored as required by HTTP semantics.
+- Preconditions run before ranges. `HEAD` ignores `Range`, keeps the full
+  representation length and sends no body. Strong content-based `If-Range` tags
+  are supported; date-form `If-Range` conservatively sends the full response.
+  Invalid date conditions are ignored; parsing accepts canonical IMF-fixdate.
+- Static reads reject every symlink or Windows reparse point below the trusted
+  configured root, including intermediate directories. One file handle supplies
+  bounded bytes and metadata; SHA-256 identifies those exact bytes. This does
+  not protect against privileged mount changes or hard links placed in the
+  public directory. Keep that directory under the application's control.
 
-Conditional requests now run before ranges. `HEAD` ignores `Range` and retains
-the full representation length while suppressing the wire body. Strong `If-Range`
-tags are supported; date-form `If-Range` conservatively sends the full response.
-Invalid date conditions are ignored; date parsing currently accepts canonical
-IMF-fixdate only. The new checks include same-size, same-timestamp binary edits.
+The static limit is 2 MiB. The runtime computes the content hash and copies binary
+bytes into interpreter text in bulk. A local loopback check served and verified a
+1 MiB response in about 10 ms; this is an observed test result, not a throughput
+guarantee. The pure Matrix SHA-256 module remains a tested reference implementation.
 
-The 764-check run is an interpreter suite. Socket-level framing validation and
-physical filesystem containment remain separate work.
+`tests/test_static_snapshot.py` verifies binary bodies, conditional/range/HEAD
+responses, preserved-timestamp edits, filesystem links and the size cap.
+`scripts/test-http-wire.py` checks real framing, backpressure, pipelines,
+half-close and deadlines. Both use bounded, owned loopback servers and verify
+cleanup; `scripts/test-platform.py` runs the complete platform campaign.
 
 ### This used to say the opposite
 

@@ -25,12 +25,17 @@ it, and report any required framework changes separately.
    pull request.
 
 Submit changes through a pull request. The public branch requires an approving
-review, resolution of review conversations, and the GitHub Actions `secrets`
-check. Do not bypass those checks with a direct push.
+review, resolution of review conversations, the GitHub Actions `secrets` check,
+and the four `web-*` platform checks. Do not bypass those checks with a direct
+push. The platform workflow builds the exact framework revision recorded in
+[its configuration](.github/workflows/test.yml), then checks the unit suite,
+real loopback HTTP behavior, filesystem boundaries and process cleanup.
 
 For server changes, also exercise the affected HTTP behavior with bounded
 clients against a local instance you own, then stop that instance. Keep
-generated outputs under the ignored `build/` directory.
+ordinary generated outputs under the ignored `build/` directory. The wire and
+platform harnesses require a fresh external `--output` directory so their
+fixtures and evidence cannot become tracked source.
 
 ## Public source review
 

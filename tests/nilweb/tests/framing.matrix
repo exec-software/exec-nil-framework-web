@@ -1,0 +1,145 @@
+!!! Pure framing regressions, including every byte boundary in chunk syntax.
+book nilweb.tests.framing
+
+read nil.std.core
+read nil.std.text
+read everything from nilweb.http.headers
+read everything from nilweb.http.request
+read everything from nilweb.http.framing
+read everything from nilweb.tests.harness
+
+framing-head receives fields as text returns text begin paragraph
+    value ending is crlf with nothing
+    give "POST /raw%2fpath?q=raw%20query HTTP/1.1" plus ending plus "Host: example.com" plus ending
+        plus fields plus ending
+end paragraph
+
+rejected-frame receives label as text, message as text, status as number returns nothing begin paragraph
+    value framed is inspect-frame with message being message, maximum being 1048576
+    evaluate same-number with label being label plus " status", actual being framed.status, expected being status
+    evaluate is-true with label being label plus " is not dispatched", actual being not framed.complete
+    give nothing
+end paragraph
+
+public run-framing-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.http.framing"
+    value ending is crlf with nothing
+    value no-body is framing-head with fields being ""
+    value next-request is "GET /second HTTP/1.1" plus ending plus "Host: example.com" plus ending plus ending
+    value empty-frame is inspect-frame with message being no-body plus next-request, maximum being 1048576
+    evaluate same-number with label being "bodyless frame consumes just its headers",
+        actual being empty-frame.consumed, expected being (nil.std.text::length with s being no-body)
+    evaluate same-text with label being "bodyless frame does not capture pipeline bytes",
+        actual being (parse-request with raw being empty-frame.message).body, expected being ""
+    value body-head is framing-head with fields being "Content-Length: 5" plus ending
+    value body-wire is body-head plus "abcde"
+    value body-frame is inspect-frame with message being body-wire plus next-request, maximum being 1048576
+    value body-request is parse-request with raw being body-frame.message
+    evaluate same-text with label being "fixed body is exactly declared length", actual being body-request.body, expected being "abcde"
+    evaluate same-text with label being "raw target remains unchanged", actual being body-request.target, expected being "/raw%2fpath?q=raw%20query"
+    evaluate same-number with label being "fixed frame consumes no following request", actual being body-frame.consumed,
+        expected being (nil.std.text::length with s being body-wire)
+    variable offset as number is 0
+    repeat while offset is less than (nil.std.text::length with s being body-wire)
+        value prefix is nil.std.text::substring with s being body-wire, start being 0, length being offset
+        value partial is inspect-frame with message being prefix, maximum being 1048576
+        evaluate is-true with label being "every fixed-body prefix waits", actual being not partial.complete and partial.status equals 0
+        set offset to offset plus 1
+    end repeat
+    value matching is inspect-frame with message being (framing-head with fields being
+        "Content-Length: 005, 5" plus ending plus "content-length: 5" plus ending) plus "abcde", maximum being 1048576
+    evaluate is-true with label being "identical repeated decimal lengths are accepted", actual being matching.complete
+    evaluate same-text with label being "duplicate lengths are normalized", actual being (header-of with request being
+        (parse-request with raw being matching.message), name being "Content-Length"), expected being "5"
+    variable bad-lengths as array of text is ["", "banana", "-1", "+1", "1 2", "1.0", "1,", ",1", "1,2"]
+    repeat for each bad in bad-lengths
+        evaluate rejected-frame with label being "invalid decimal length", message being
+            (framing-head with fields being "Content-Length: " plus bad plus ending), status being 400
+    end repeat
+    evaluate rejected-frame with label being "conflicting repeated lengths", message being (framing-head with fields being
+        "Content-Length: 1" plus ending plus "Content-Length: 2" plus ending), status being 400
+    evaluate rejected-frame with label being "huge decimal length is bounded", message being (framing-head with fields being
+        "Content-Length: 999999999999999999999999999999999999" plus ending), status being 413
+    evaluate rejected-frame with label being "transfer encoding and length conflict", message being (framing-head with fields being
+        "Content-Length: 0" plus ending plus "Transfer-Encoding: chunked" plus ending), status being 400
+    evaluate rejected-frame with label being "unsupported coding before chunked", message being (framing-head with fields being
+        "Transfer-Encoding: gzip, chunked" plus ending), status being 501
+    variable bad-codings as array of text is ["", "gzip", "chunked, gzip", "chunked, chunked", "chunked;foo=bar", "chunked,"]
+    repeat for each bad in bad-codings
+        evaluate rejected-frame with label being "invalid transfer framing", message being
+            (framing-head with fields being "Transfer-Encoding: " plus bad plus ending), status being 400
+    end repeat
+    evaluate rejected-frame with label being "HTTP1.0 cannot use transfer coding", message being
+        "POST / HTTP/1.0" plus ending plus "Transfer-Encoding: chunked" plus ending plus ending, status being 400
+    variable bad-headers as array of text is ["Content-Length : 0", " Content-Length: 0", "NoColon", "Bad(Name): 0"]
+    repeat for each bad in bad-headers
+        evaluate rejected-frame with label being "malformed field syntax", message being
+            (framing-head with fields being bad plus ending), status being 400
+    end repeat
+    evaluate rejected-frame with label being "bare LF is not wire framing", message being
+        "GET / HTTP/1.1" plus newline plus "Host: example.com" plus newline plus newline, status being 400
+    variable expectations as array of text is ["100-continue", "100-CONTINUE", "unsupported", "", "100-continue, unsupported"]
+    repeat for each expectation in expectations
+        evaluate rejected-frame with label being "Expect rejected from headers before body", message being
+            (framing-head with fields being "Content-Length: 5" plus ending plus "Expect: " plus expectation plus ending), status being 417
+    end repeat
+    evaluate rejected-frame with label being "Expect on chunked request does not wait for chunks", message being
+        (framing-head with fields being "Transfer-Encoding: chunked" plus ending plus "Expect: 100-continue" plus ending), status being 417
+    evaluate rejected-frame with label being "Expect policy also applies when body already arrived", message being
+        (framing-head with fields being "Content-Length: 5" plus ending plus "Expect: 100-continue" plus ending) plus "abcde", status being 417
+    evaluate rejected-frame with label being "repeated Expect fields share the same HTTP1.1 policy", message being
+        (framing-head with fields being "Content-Length: 5" plus ending plus "Expect: 100-continue" plus ending
+            plus "Expect: 100-CONTINUE, 100-continue" plus ending), status being 417
+    value legacy-head is "POST /legacy HTTP/1.0" plus ending plus "Content-Length: 5" plus ending
+        plus "Expect: 100-continue" plus ending plus "Expect: 100-CONTINUE, 100-continue" plus ending plus ending
+    value legacy-waiting is inspect-frame with message being legacy-head, maximum being 1048576
+    evaluate is-true with label being "HTTP1.0 ignores 100-continue and awaits its body", actual being
+        legacy-waiting.status equals 0 and not legacy-waiting.complete
+    value legacy-complete is inspect-frame with message being legacy-head plus "abcde", maximum being 1048576
+    evaluate is-true with label being "HTTP1.0 ignored expectation preserves body framing", actual being legacy-complete.complete
+    evaluate rejected-frame with label being "HTTP1.0 unsupported expectation fails", message being
+        "POST /legacy HTTP/1.0" plus ending plus "Content-Length: 5" plus ending
+            plus "Expect: unsupported" plus ending plus ending, status being 417
+    evaluate rejected-frame with label being "HTTP1.0 mixed repeated expectations still fail", message being
+        "POST /legacy HTTP/1.0" plus ending plus "Content-Length: 5" plus ending
+            plus "Expect: 100-continue" plus ending plus "Expect: 100-continue, unsupported" plus ending plus ending, status being 417
+    value chunk-head is framing-head with fields being "Transfer-Encoding: Chunked" plus ending plus "Trailer: X-Note" plus ending
+    value chunks is "2;flag;name=" plus quote plus "a;b" plus quote plus ending plus "ab" plus ending
+        plus "3" plus ending plus "cde" plus ending plus "0" plus ending plus "X-Note: discarded" plus ending plus ending
+    value chunk-wire is chunk-head plus chunks
+    value chunked is inspect-frame with message being chunk-wire plus next-request, maximum being 1048576
+    value decoded is parse-request with raw being chunked.message
+    evaluate is-true with label being "chunked frame is complete", actual being chunked.complete
+    evaluate same-text with label being "chunked body is decoded", actual being decoded.body, expected being "abcde"
+    evaluate same-number with label being "chunked framing consumes its trailers only", actual being chunked.consumed,
+        expected being (nil.std.text::length with s being chunk-wire)
+    evaluate same-text with label being "chunked transfer header is removed", actual being (header-of with request being decoded, name being "Transfer-Encoding"), expected being ""
+    evaluate same-text with label being "trailer declaration is removed", actual being (header-of with request being decoded, name being "Trailer"), expected being ""
+    evaluate same-text with label being "trailer is not merged into application headers", actual being (header-of with request being decoded, name being "X-Note"), expected being ""
+    evaluate same-text with label being "decoded content length is synthesized", actual being (header-of with request being decoded, name being "Content-Length"), expected being "5"
+    set offset to 0
+    repeat while offset is less than (nil.std.text::length with s being chunk-wire)
+        value partial is inspect-frame with message being (nil.std.text::substring with s being chunk-wire, start being 0, length being offset), maximum being 1048576
+        evaluate is-true with label being "every chunked byte boundary waits", actual being not partial.complete and partial.status equals 0
+        set offset to offset plus 1
+    end repeat
+    variable bad-chunks as array of text is ["Z", "-1", "+1", "1.0", "1;", "1;=bad", "1;name=", "1;name=" plus quote plus "open"]
+    repeat for each bad in bad-chunks
+        evaluate rejected-frame with label being "invalid chunk size or extension", message being chunk-head plus bad plus ending, status being 400
+    end repeat
+    evaluate rejected-frame with label being "huge hexadecimal chunk is bounded", message being chunk-head plus "FFFFFFFFFFFFFFFFFFFFFFFF" plus ending, status being 413
+    evaluate rejected-frame with label being "chunk payload requires CRLF", message being chunk-head plus "1" plus ending plus "xNO", status being 400
+    evaluate rejected-frame with label being "trailers use strict field syntax", message being chunk-head plus "0" plus ending plus "Bad Field: value" plus ending plus ending, status being 400
+    evaluate rejected-frame with label being "bare LF chunk line is rejected immediately", message being chunk-head plus "1" plus newline, status being 400
+    evaluate rejected-frame with label being "bare LF trailer is rejected immediately", message being chunk-head plus "0" plus ending plus "X-Note: discarded" plus newline, status being 400
+    value capped is inspect-frame with message being body-wire, maximum being (nil.std.text::length with s being body-wire) minus 1
+    evaluate same-number with label being "request cap counts headers plus body", actual being capped.status, expected being 413
+    value exact is inspect-frame with message being body-wire plus next-request, maximum being (nil.std.text::length with s being body-wire)
+    evaluate is-true with label being "pipeline surplus does not count against first request cap", actual being exact.complete
+    value closing is inspect-frame with message being (framing-head with fields being "Connection: keep-alive" plus ending
+        plus "Connection: upgrade, close" plus ending), maximum being 1048576
+    evaluate is-true with label being "close token wins across repeated connection fields", actual being closing.complete and not closing.keeping
+    value not-closing is inspect-frame with message being (framing-head with fields being "Connection: disclose" plus ending), maximum being 1048576
+    evaluate is-true with label being "connection tokens are not substring matches", actual being not-closing.keeping
+    give nothing
+end paragraph
