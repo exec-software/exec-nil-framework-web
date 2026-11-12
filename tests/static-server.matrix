@@ -1,0 +1,53 @@
+!!! Bounded owned fixture for test_static_snapshot.py; never a demo server.
+book nilweb.static.fixture
+
+read nil.std.core
+read nil.std.system.environment
+read everything from nilweb.http.request
+read everything from nilweb.http.response
+read everything from nilweb.http.headers
+read everything from nilweb.server.engine
+read everything from nilweb.static.files
+
+main returns number begin paragraph
+    variable port as number is 0
+    variable root as text is ""
+    variable token as text is ""
+    value configured-port is nil.std.system::get_environment_variable with name being "NILWEB_STATIC_PORT"
+    consider configured-port
+        when Option.Some holding digits then set port to digits becomes number
+        otherwise give 2
+    end consider
+    value configured-root is nil.std.system::get_environment_variable with name being "NILWEB_STATIC_ROOT"
+    consider configured-root
+        when Option.Some holding path then set root to path
+        otherwise give 2
+    end consider
+    value configured-token is nil.std.system::get_environment_variable with name being "NILWEB_STATIC_TOKEN"
+    consider configured-token
+        when Option.Some holding secret then set token to secret
+        otherwise give 2
+    end consider
+    when root equals "" or token equals "" then give 2 end when
+    value server is start-engine with host being "127.0.0.1", port being port, limit being 8
+    when not server.live then give 3 end when
+    value started is now in milliseconds
+    variable running as boolean is true
+    repeat while running and ((now in milliseconds) minus started) is less than 90000
+        value ready is pump with server being server, timeout being 10
+        when ready.found then
+            value request is parse-request with raw being ready.request
+            value control is request.path equals "/__probe_" plus token or request.path equals "/__shutdown_" plus token
+            variable answer is text-response with body being token
+            when not control then
+                set answer to serve-static with root being root, path being request.path, request being request, seconds being 60
+            end when
+            set answer to with-header with response being answer, name being "Connection", content being "close"
+            evaluate reply with server being server, handle being ready.handle,
+                response being (render-response with response being answer, verb being request.verb), keep-open being false
+            when request.path equals "/__shutdown_" plus token then set running to false end when
+        end when
+    end repeat
+    evaluate stop-engine with server being server
+    give 0
+end paragraph

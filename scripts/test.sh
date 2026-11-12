@@ -17,6 +17,7 @@ else
 fi
 OUT="${ROOT}/build"
 mkdir -p "$OUT"
+cd "$ROOT"
 "$SDK/nilcompiler" --no-bundle \
     -I "$STDLIB" -I "$ROOT/src" -I "$ROOT/tests" \
     --output "$OUT/tests.nil" "$ROOT/tests/run-tests.matrix" > /dev/null

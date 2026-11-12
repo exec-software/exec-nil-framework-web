@@ -4,12 +4,10 @@
 !!! path is allowed to name — and the ways that decision goes wrong are well
 !!! known enough to enumerate. Each check below is one of them.
 !!!
-!!! The file is read whole into text. That is fine for the stylesheets and
-!!! scripts a page needs and wrong for anything large, and it is what the
-!!! runtime offers: `file.read_text` reads a whole file, and the streaming
-!!! handles exist but there is nothing to stream *to* until there is a socket.
-!!! `maximum-bytes` keeps a large file from being read at all rather than
-!!! pretending it can be served.
+!!! One framework snapshot reads bytes, metadata and a content digest through
+!!! directory-relative handles. No component below the configured root may be
+!!! a symlink or Windows reparse point. The bounded bytes become interpreter
+!!! text in one copy; the response layer is still an interpreter-only API.
 
 book nilweb.static.files
 
@@ -21,6 +19,7 @@ read everything from nilweb.text.scan
 read everything from nilweb.http.status
 read everything from nilweb.http.headers
 read everything from nilweb.http.request
+read everything from nilweb.http.method
 read everything from nilweb.time.clock
 read everything from nilweb.http.response
 
@@ -38,46 +37,49 @@ constant maximum-bytes as number is 2097152
 !!! things that exist — a probe must not be able to tell a file it may not see
 !!! from a file that is not there.
 
-public serve-file receives root as text, path as text returns http-response begin paragraph
+static-read begin record
+    field answer as http-response
+    field marks as validators
+end record
+
+failed-read receives code as number returns static-read begin paragraph
+    value explanation is when code equals status-payload-too-large
+        give "That file is too large to serve" otherwise give "No such file" end when
+    give build static-read with
+        answer being (error-response with code being code, explanation being explanation),
+        marks being (build validators with found being false, width being 0, stamped-at being 0, tag being "")
+end paragraph
+
+read-static receives root as text, path as text returns static-read begin paragraph
     value relative is without-leading-slash with path being path
-    when not (is-safe-name with name being relative) then
-        give error-response with code being status-not-found, explanation being "No such file"
+    when relative equals "" or not (is-safe-name with name being relative) then
+        give failed-read with code being status-not-found
     end when
-    when relative equals "" then
-        give error-response with code being status-not-found, explanation being "No such file"
-    end when
-
-    value full is when root equals "" give relative otherwise give root plus "/" plus relative end when
-    when not (nil.std.io::exists with path being full) then
-        give error-response with code being status-not-found, explanation being "No such file"
-    end when
-
-    value measured is nil.std.io::size with path being full
-    consider measured
-        !!! `begin block` because this arm holds its own `when`: without it
-        !!! the nested conditional reads as the next pattern arm.
-        when Result.Ok holding width then begin block
-            when width is greater than maximum-bytes then
-                give error-response with code being status-payload-too-large,
-                    explanation being "That file is too large to serve"
-            end when
-        end block
-        when Result.Error holding why then
-            give error-response with code being status-not-found, explanation being "No such file"
-        otherwise
-            give error-response with code being status-not-found, explanation being "No such file"
-    end consider
-
-    value outcome is nil.std.io::read_text with path being full
+    value directory is when root equals "" give "." otherwise give root end when
+    value outcome is nil.std.io::read_rooted_snapshot with root being directory,
+        relative being relative, maximum_bytes being maximum-bytes
     consider outcome
-        when Result.Ok holding body then
-            give make-response with code being status-ok,
-                kind being (media-type-of with name being relative), body being body
-        when Result.Error holding why then
-            give error-response with code being status-not-found, explanation being "No such file"
-        otherwise
-            give error-response with code being status-not-found, explanation being "No such file"
+        when Result.Ok holding snapshot then begin block
+            value body is nil.std.text::from_bytes with data being snapshot.content
+            give build static-read with
+                answer being (make-response with code being status-ok,
+                    kind being (media-type-of with name being relative), body being body),
+                marks being (build validators with found being true,
+                    width being (nil.std.text::length with s being body),
+                    stamped-at being snapshot.modified_ms, tag being quote plus snapshot.sha256 plus quote)
+        end block
+        when Result.Error holding why then begin block
+            when why equals "file.read_rooted_snapshot: input exceeds maximum_bytes" then
+                give failed-read with code being status-payload-too-large
+            end when
+            give failed-read with code being status-not-found
+        end block
+        otherwise give failed-read with code being status-not-found
     end consider
+end paragraph
+
+public serve-file receives root as text, path as text returns http-response begin paragraph
+    give (read-static with root being root, path being path).answer
 end paragraph
 
 
@@ -214,151 +216,173 @@ public validators begin record
 end record
 
 
-!!! --- Read a file's size and timestamp without reading the file.
+!!! --- Identity of the bytes actually served.
 !!!
-!!! The ETag is built from both, which is what Apache does by default and is
-!!! sound for the same reason: a file whose length and modification time are
-!!! both unchanged is, barring deliberate effort, unchanged. A content hash
-!!! would be stronger and needs a hash function the standard library does not
-!!! have yet.
-!!!
-!!! Quoted and not weak-prefixed, because it compares byte-for-byte: two
-!!! responses with this tag really are the same bytes, so it is usable for
-!!! ranges as well as for revalidation, which a weak tag is not.
+!!! Hashing the representation prevents equal-length edits with preserved
+!!! timestamps from reusing an ETag. A request reads content once and hashes
+!!! that same body; Last-Modified is supplemental, second-resolution metadata.
 
 public validators-of receives root as text, path as text returns validators begin paragraph
-    value relative is without-leading-slash with path being path
-    when not (is-safe-name with name being relative) or relative equals "" then
-        give build validators with found being false, width being 0, stamped-at being 0, tag being ""
-    end when
-    value full is when root equals "" give relative otherwise give root plus "/" plus relative end when
-    when not (nil.std.io::exists with path being full) then
-        give build validators with found being false, width being 0, stamped-at being 0, tag being ""
-    end when
-
-    variable width as number is 0 minus 1
-    value measured is nil.std.io::size with path being full
-    consider measured
-        when Result.Ok holding found-width then set width to found-width
-        otherwise set width to 0 minus 1
-    end consider
-    variable stamped as number is 0 minus 1
-    value timed is nil.std.io::modified_at with path being full
-    consider timed
-        when Result.Ok holding at-ms then set stamped to at-ms
-        otherwise set stamped to 0 minus 1
-    end consider
-    when width is less than 0 or stamped is less than 0 then
-        give build validators with found being false, width being 0, stamped-at being 0, tag being ""
-    end when
-
-    give build validators with found being true, width being width, stamped-at being stamped,
-        tag being quote plus (base-sixteen with amount being stamped) plus "-"
-            plus (base-sixteen with amount being width) plus quote
+    give (read-static with root being root, path being path).marks
 end paragraph
 
 
-!!! --- Serve a file, answering 304 when the client's copy is still good.
-!!!
-!!! The 304 carries the ETag and the caching headers and no body, which is the
-!!! whole point: the client keeps what it has and the server sends a few dozen
-!!! bytes instead of a few kilobytes.
-!!!
-!!! A 304 must not carry Content-Type or Content-Length — the response is not
-!!! the representation, and a client told otherwise may believe the
-!!! representation is now empty. render-response drops the body for a 304 and
-!!! omits Content-Length; Content-Type is never set because this builds the
-!!! response directly rather than through make-response.
+!!! --- Ordinary failures precede conditions; conditions precede Range.
+!!! RFC 9110 sections 13.2.1 and 13.2.2. A present empty tag field still
+!!! suppresses its date fallback. If-Match compares strongly; If-None-Match
+!!! compares weakly and returns 304 only for GET/HEAD, otherwise 412.
 
 public serve-revalidated receives root as text, path as text, request as http-request,
     seconds as number returns http-response begin paragraph
-    value marks is validators-of with root being root, path being path
-    when not marks.found then
-        give error-response with code being status-not-found, explanation being "No such file"
+    value loaded is read-static with root being root, path being path
+    value answer is loaded.answer
+    when answer.code does not equal status-ok then give answer end when
+    value marks is loaded.marks
+    value full is with-validators with response being answer, marks being marks, seconds being seconds
+    when (method-name with verb being request.verb) equals "OPTIONS" then give full end when
+
+    value has-match is has-field with fields being request.fields, name being "If-Match"
+    when has-match then
+        when not (tag-matches with offered being (list-field with fields being request.fields,
+            name being "If-Match"), tag being marks.tag, strong being true) then
+            give precondition-failed with nothing
+        end when
+    otherwise
+        value unmodified is valid-date with stated being (single-field with fields being request.fields,
+            name being "If-Unmodified-Since")
+        when marks.stamped-at is at least 0 and unmodified is at least 0
+            and (marks.stamped-at over 1000) is greater than (unmodified over 1000) then
+            give precondition-failed with nothing
+        end when
     end when
 
-    !!! The tag is checked before the date, as RFC 9110 requires: a client
-    !!! sending both means the tag to win, because it is the precise one.
-    value offered is header-of with request being request, name being "If-None-Match"
-    value since is header-of with request being request, name being "If-Modified-Since"
-    value by-tag is tag-matches with offered being offered, tag being marks.tag
-    value by-date is offered equals ""
-        and (not-modified-since with stated being since, stamped-at being marks.stamped-at)
-    when by-tag or by-date then
-        variable fields is no-headers with nothing
-        set fields to set-field with fields being fields, name being "ETag", content being marks.tag
-        set fields to set-field with fields being fields, name being "Last-Modified",
+    value retrieval is (method-name with verb being request.verb) equals "GET" or (method-name with verb being request.verb) equals "HEAD"
+    value has-none-match is has-field with fields being request.fields, name being "If-None-Match"
+    when has-none-match then
+        when tag-matches with offered being (list-field with fields being request.fields,
+            name being "If-None-Match"), tag being marks.tag, strong being false then
+            when retrieval then
+                give with-validators with response being (empty-response with code being status-not-modified),
+                    marks being marks, seconds being seconds
+            end when
+            give precondition-failed with nothing
+        end when
+    end when
+    when not has-none-match and retrieval and (not-modified-since with stated being (single-field with fields being request.fields,
+        name being "If-Modified-Since"), stamped-at being marks.stamped-at) then
+        give with-validators with response being (empty-response with code being status-not-modified),
+            marks being marks, seconds being seconds
+    end when
+    give full
+end paragraph
+
+
+with-validators receives response as http-response, marks as validators,
+    seconds as number returns http-response begin paragraph
+    variable answer is with-header with response being response, name being "ETag", content being marks.tag
+    when marks.stamped-at is at least 0 then
+        set answer to with-header with response being answer, name being "Last-Modified",
             content being (http-date with at-ms being marks.stamped-at)
-        set fields to set-field with fields being fields, name being "Cache-Control",
-            content being "public, max-age=" plus (seconds becomes text)
-        give build http-response with code being status-not-modified, fields being fields, body being ""
     end when
-
-    value answer is serve-file with root being root, path being path
-    when answer.code does not equal status-ok then
-        give answer
-    end when
-    variable full is with-header with response being answer, name being "ETag", content being marks.tag
-    set full to with-header with response being full, name being "Last-Modified",
-        content being (http-date with at-ms being marks.stamped-at)
-    give with-header with response being full, name being "Cache-Control",
+    give with-header with response being answer, name being "Cache-Control",
         content being "public, max-age=" plus (seconds becomes text)
 end paragraph
 
 
-!!! --- Whether the file is unchanged since the date a client holds.
-!!!
-!!! Compared in seconds, because an HTTP date has no finer resolution: a file
-!!! written 300ms after the second the client was told would otherwise look
-!!! modified on every request, forever, and the client would never get a 304.
-!!! Truncating both sides to the second is what the specification's own
-!!! comparison means.
-!!!
-!!! An unreadable date is "modified" — the full representation, which is
-!!! always correct. Reading it wrongly and answering 304 would serve a stale
-!!! page, which is the failure that matters.
+precondition-failed returns http-response begin paragraph
+    give error-response with code being status-precondition-failed, explanation being "The file does not meet the request conditions"
+end paragraph
+
+
+!!! The current clock reader supports IMF-fixdate. Canonical round-tripping
+!!! rejects malformed separators, impossible calendar dates and wrong weekdays.
+!!! Unrecognised dates, including obsolete HTTP-date spellings, are ignored.
+
+valid-date receives stated as text returns number begin paragraph
+    value trimmed is nil.std.text::trim with s being stated
+    value parsed is ms-from-http-date with stated being trimmed
+    when parsed is less than 0 then give 0 minus 1 end when
+    when (http-date with at-ms being parsed) does not equal trimmed then give 0 minus 1 end when
+    give parsed
+end paragraph
+
 
 not-modified-since receives stated as text, stamped-at as number returns boolean begin paragraph
-    when stated equals "" then
-        give false
-    end when
-    value held is ms-from-http-date with stated being stated
-    when held is less than 0 then
-        give false
-    end when
+    value held is valid-date with stated being stated
+    when held is less than 0 or stamped-at is less than 0 then give false end when
     give (stamped-at over 1000) is at most (held over 1000)
 end paragraph
 
 
-!!! --- Whether an If-None-Match names this representation.
-!!!
-!!! `*` matches anything that exists, which is what a conditional request uses
-!!! to mean "if there is one at all". Otherwise the field is a comma-separated
-!!! list and a match is a match; the weak prefix is accepted and ignored,
-!!! because a client that sends `W/"x"` for a tag it was given as `"x"` is
-!!! being imprecise rather than asking about a different thing.
+!!! List fields may be repeated; singleton date/If-Range fields may not.
 
-tag-matches receives offered as text, tag as text returns boolean begin paragraph
-    when offered equals "" then
-        give false
-    end when
-    value trimmed is nil.std.text::trim with s being offered
-    when trimmed equals "*" then
-        give true
-    end when
-    value parts is split-on with input being trimmed, separator being ","
-    repeat for each part in parts
-        value one is nil.std.text::trim with s being part
-        value bare is when nil.std.text::starts_with with s being one, prefix being "W/"
-            give nil.std.text::substring with s being one, start being 2,
-                length being (nil.std.text::length with s being one) minus 2
-            otherwise give one
-        end when
-        when bare equals tag then
-            give true
+list-field receives fields as array of header-field, name as text returns text begin paragraph
+    value held is field-values with fields being fields, name being name
+    variable joined as text is ""
+    variable first as boolean is true
+    repeat for each one in held
+        when not first then set joined to joined plus "," end when
+        set joined to joined plus one
+        set first to false
+    end repeat
+    give joined
+end paragraph
+
+
+single-field receives fields as array of header-field, name as text returns text begin paragraph
+    value held is field-values with fields being fields, name being name
+    when the length of held does not equal 1 then give "" end when
+    give held at 0
+end paragraph
+
+
+!!! Parse entity-tag lists without splitting commas inside opaque quoted tags.
+!!! Validate the whole list before accepting a match, and only permit the weak
+!!! prefix for weak comparison. Backslashes have no escape meaning in an ETag.
+
+tag-matches receives offered as text, tag as text, strong as boolean returns boolean begin paragraph
+    value input is nil.std.text::trim with s being offered
+    when input equals "*" then give true end when
+    value width is nil.std.text::length with s being input
+    variable index as number is 0
+    variable matched as boolean is false
+    repeat while index is less than width
+        variable code as number is nil.std.text::byte_at with s being input, index being index
+        when code equals 32 or code equals 9 or code equals 44 then
+            set index to index plus 1
+        otherwise
+            variable weak as boolean is false
+            when (nil.std.text::substring with s being input, start being index, length being 2) equals "W/" then
+                set weak to true
+                set index to index plus 2
+            end when
+            when index is at least width then give false end when
+            when (nil.std.text::byte_at with s being input, index being index) does not equal 34 then give false end when
+            value first is index
+            set index to index plus 1
+            variable closed as boolean is false
+            repeat while index is less than width and not closed
+                set code to nil.std.text::byte_at with s being input, index being index
+                when code equals 34 then
+                    set closed to true
+                end when
+                when code is less than 33 or code equals 127 then give false end when
+                set index to index plus 1
+            end repeat
+            when not closed then give false end when
+            value bare is nil.std.text::substring with s being input, start being first, length being index minus first
+            when bare equals tag and (not strong or not weak) then set matched to true end when
+            repeat while index is less than width
+                set code to nil.std.text::byte_at with s being input, index being index
+                when code does not equal 32 and code does not equal 9 then stop repeating end when
+                set index to index plus 1
+            end repeat
+            when index is less than width then
+                when (nil.std.text::byte_at with s being input, index being index) does not equal 44 then give false end when
+            end when
         end when
     end repeat
-    give false
+    give matched
 end paragraph
 
 
@@ -386,11 +410,12 @@ end record
 public range-of receives stated as text, width as number returns asked-range begin paragraph
     value absent is build asked-range with present being false, satisfiable being false,
         first-byte being 0, last-byte being 0
-    when stated equals "" then
+    when stated equals "" or width is at most 0 then
+        !!! RFC 9110 permits ignoring Range for an empty representation.
         give absent
     end when
     value trimmed is nil.std.text::trim with s being stated
-    when not (nil.std.text::starts_with with s being trimmed, prefix being "bytes=") then
+    when not (nil.std.text::starts_with with s being (nil.std.text::to_lower with s being trimmed), prefix being "bytes=") then
         !!! An unknown unit is ignored, as RFC 9110 requires, rather than
         !!! refused: the whole representation is a valid answer to it.
         give absent
@@ -402,8 +427,8 @@ public range-of receives stated as text, width as number returns asked-range beg
         give absent
     end when
 
-    value first-text is nil.std.text::trim with s being (before-first with input being spec, separator being "-")
-    value last-text is nil.std.text::trim with s being (after-first with input being spec, separator being "-")
+    value first-text is before-first with input being spec, separator being "-"
+    value last-text is after-first with input being spec, separator being "-"
     when not (nil.std.text::contains with s being spec, needle being "-") then
         give unsatisfiable with nothing
     end when
@@ -450,7 +475,7 @@ end paragraph
 
 count-of receives digits as text returns number begin paragraph
     value width is nil.std.text::length with s being digits
-    when width is less than 1 or width is greater than 18 then
+    when width is less than 1 then
         give 0 minus 1
     end when
     variable total as number is 0
@@ -460,97 +485,57 @@ count-of receives digits as text returns number begin paragraph
         when code is less than 48 or code is greater than 57 then
             give 0 minus 1
         end when
-        set total to (total times 10) plus (code minus 48)
+        !!! Saturate while continuing to validate every digit. A huge suffix
+        !!! or end offset is valid and clamps; a huge first offset cannot fit.
+        when total is greater than 922337203685477580
+            or (total equals 922337203685477580 and code is greater than 55) then
+            set total to 9223372036854775807
+        otherwise
+            set total to (total times 10) plus (code minus 48)
+        end when
         set index to index plus 1
     end repeat
     give total
 end paragraph
 
 
-!!! --- Serve a file, honouring Range and If-None-Match.
-!!!
-!!! What a browser fetching a video or a client resuming a download expects.
-!!! Accept-Ranges is advertised on the full response too, because a client
-!!! only asks for a range if it has been told ranges are available.
+!!! --- Apply ranges only to a GET whose ordinary response would be 200.
+!!! HEAD keeps the full body internally so render-response can calculate the
+!!! GET Content-Length while suppressing its wire body. If-Range compares a
+!!! single strong content ETag. Date validators are not known strong for files
+!!! that can be edited more than once a second, so date-form If-Range falls
+!!! back to the whole representation (RFC 9110 Last-Modified comparison and If-Range rules).
 
 public serve-static receives root as text, path as text, request as http-request,
     seconds as number returns http-response begin paragraph
-    value marks is validators-of with root being root, path being path
-    when not marks.found then
-        give error-response with code being status-not-found, explanation being "No such file"
-    end when
+    value answer is serve-revalidated with root being root, path being path,
+        request being request, seconds being seconds
+    when answer.code does not equal status-ok then give answer end when
+    value whole is with-header with response being answer, name being "Accept-Ranges", content being "bytes"
+    when (method-name with verb being request.verb) does not equal "GET" then give whole end when
 
-    value wanted is range-of with stated being
-        (header-of with request being request, name being "Range"), width being marks.width
-    when not wanted.present then
-        value whole is serve-revalidated with root being root, path being path,
-            request being request, seconds being seconds
-        when whole.code does not equal status-ok then
-            give whole
-        end when
-        give with-header with response being whole, name being "Accept-Ranges", content being "bytes"
+    when has-field with fields being request.fields, name being "If-Range" then
+        value offered is nil.std.text::trim with s being (single-field with fields being request.fields, name being "If-Range")
+        value tag is field-value with fields being whole.fields, name being "ETag"
+        when offered does not equal tag then give whole end when
     end when
-
+    value width is nil.std.text::length with s being whole.body
+    value wanted is range-of with stated being (single-field with fields being request.fields, name being "Range"),
+        width being width
+    when not wanted.present then give whole end when
     when not wanted.satisfiable then
-        !!! 416 carries Content-Range naming the real length, which is how a
-        !!! client that was resuming discovers the file is a different size.
         value refusal is error-response with code being status-range-not-satisfiable,
             explanation being "That range is outside the file"
         value ranged is with-header with response being refusal, name being "Content-Range",
-            content being "bytes */" plus (marks.width becomes text)
+            content being "bytes */" plus (width becomes text)
         give with-header with response being ranged, name being "Accept-Ranges", content being "bytes"
     end when
 
-    value answer is serve-file with root being root, path being path
-    when answer.code does not equal status-ok then
-        give answer
-    end when
-    value taken is nil.std.text::substring with s being answer.body, start being wanted.first-byte,
+    value taken is nil.std.text::substring with s being whole.body, start being wanted.first-byte,
         length being wanted.last-byte minus wanted.first-byte plus 1
-    variable partial is with-body with response being (with-status with response being answer,
+    value partial is with-body with response being (with-status with response being whole,
         code being status-partial-content), body being taken
-    set partial to with-header with response being partial, name being "Content-Range",
+    give with-header with response being partial, name being "Content-Range",
         content being "bytes " plus (wanted.first-byte becomes text) plus "-"
-            plus (wanted.last-byte becomes text) plus "/" plus (marks.width becomes text)
-    set partial to with-header with response being partial, name being "Accept-Ranges", content being "bytes"
-    set partial to with-header with response being partial, name being "ETag", content being marks.tag
-    give partial
-end paragraph
-
-
-!!! --- A whole number in lower-case hexadecimal, for the ETag.
-
-base-sixteen receives amount as number returns text begin paragraph
-    when amount is at most 0 then
-        give "0"
-    end when
-    variable rest as number is amount
-    variable out as text is ""
-    repeat while rest is greater than 0
-        set out to (hex-glyph with amount being (rest remainder 16)) plus out
-        set rest to rest over 16
-    end repeat
-    give out
-end paragraph
-
-
-hex-glyph receives amount as number returns text begin paragraph
-    give switch amount
-        case 0 then stop switching with "0"
-        case 1 then stop switching with "1"
-        case 2 then stop switching with "2"
-        case 3 then stop switching with "3"
-        case 4 then stop switching with "4"
-        case 5 then stop switching with "5"
-        case 6 then stop switching with "6"
-        case 7 then stop switching with "7"
-        case 8 then stop switching with "8"
-        case 9 then stop switching with "9"
-        case 10 then stop switching with "a"
-        case 11 then stop switching with "b"
-        case 12 then stop switching with "c"
-        case 13 then stop switching with "d"
-        case 14 then stop switching with "e"
-        otherwise stop switching with "f"
-    end switch
+            plus (wanted.last-byte becomes text) plus "/" plus (width becomes text)
 end paragraph

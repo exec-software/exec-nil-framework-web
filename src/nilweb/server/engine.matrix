@@ -35,6 +35,7 @@ read nil.std.text
 read nil.std.text.string_utils
 read everything from nilweb.text.scan
 read everything from nilweb.http.headers
+read everything from nilweb.http.framing
 
 
 !!! How long a connection may sit idle before it is closed.
@@ -52,8 +53,9 @@ constant between-requests-limit-ms as number is 30000
 !!! slot indefinitely -- which is what slowloris is.
 constant request-deadline-ms as number is 20000
 
-!!! The most a request may be, header and body together. The cap stops the
-!!! reading rather than rejecting afterwards.
+!!! The most one wire request may be, header and body together. Framing
+!!! rejects an oversized declaration before waiting for its body. One socket
+!!! read of bounded pipeline surplus is retained separately.
 constant request-limit as number is 1048576
 
 !!! One read per pass. Large enough that an ordinary request arrives whole.
@@ -79,9 +81,12 @@ public connection begin record
     field live as boolean
     !!! Whether to keep the connection after the response in flight.
     field keeping as boolean
-    !!! When the current request started arriving, and when anything last did.
+    !!! Oldest buffered input time (conservative across a pipeline), and the
+    !!! most recent input/output progress. New fragments never extend a deadline.
     field started-at as number
     field touched-at as number
+    field input-closed as boolean
+    field serving as boolean
     !!! Captured at accept, because by the time a response is logged the
     !!! socket may be closed and getpeername would fail. For the log only:
     !!! an address is not an identity, and behind a proxy it is the proxy's.
@@ -202,6 +207,8 @@ public pump receives server as engine, timeout as number returns pumped begin pa
         give nothing-found with nothing
     end when
 
+    evaluate sweep-idle with server being server
+
     !!! Something framed on an earlier pass and not yet handed over.
     value already is first-framed with server being server
     when already.found then
@@ -233,6 +240,7 @@ public pump receives server as engine, timeout as number returns pumped begin pa
         end consider
     end repeat
 
+    evaluate sweep-idle with server being server
     give first-framed with server being server
 end paragraph
 
@@ -261,11 +269,9 @@ act-on receives server as engine, ready as number returns nothing begin paragrap
     when nil.std.net::is_readable with packed being ready then
         evaluate pull-incoming with server being server, slot being slot
     end when
-    when nil.std.net::is_finished with packed being ready then
-        value held is server.connections at slot
-        when held.live and (nil.std.text::length with s being held.outgoing) equals held.sent then
-            evaluate drop with server being server, slot being slot
-        end when
+    when (nil.std.net::is_finished with packed being ready)
+        and not (nil.std.net::is_readable with packed being ready) then
+        evaluate finish-input with server being server, slot being slot
     end when
     give nothing
 end paragraph
@@ -325,7 +331,7 @@ admit receives server as engine, client as number returns nothing begin paragrap
     value fresh is build connection with handle being client, gathered being "", outgoing being "",
         sent being 0, served being 0, live being true, keeping being true,
         started-at being now-at, touched-at being now-at,
-        peer being (peer-of with handle being client)
+        input-closed being false, serving being false, peer being (peer-of with handle being client)
     when free-slot is at least 0 then
         set server.connections at free-slot to fresh
     otherwise
@@ -342,6 +348,10 @@ pull-incoming receives server as engine, slot as number returns nothing begin pa
         give nothing
     end when
 
+    !!! A readiness batch can contain both flags. Do not receive more input
+    !!! after a writable event left a response partially sent.
+    when (nil.std.text::length with s being held.outgoing) is greater than held.sent then give nothing end when
+
     value counted is nil.std.net::receive with handle being held.handle, maximum_bytes being chunk-size
     consider counted
         when Result.Error holding why then begin block
@@ -356,7 +366,7 @@ pull-incoming receives server as engine, slot as number returns nothing begin pa
                 give nothing
             end when
             when amount equals 0 then
-                evaluate drop with server being server, slot being slot
+                evaluate finish-input with server being server, slot being slot
                 give nothing
             end when
             value arrived is nil.std.net::received with nothing
@@ -373,38 +383,63 @@ pull-incoming receives server as engine, slot as number returns nothing begin pa
 end paragraph
 
 
+finish-input receives server as engine, slot as number returns nothing begin paragraph
+    value held is server.connections at slot
+    when not held.live then give nothing end when
+    set held.input-closed to true
+    evaluate nil.std.net::unwatch with handle being held.handle
+    when (nil.std.text::length with s being held.outgoing) is greater than held.sent then
+        evaluate nil.std.net::watch with handle being held.handle, flags being nil.std.net::ready_writable
+    end when
+    when held.gathered equals "" and not held.serving
+        and (nil.std.text::length with s being held.outgoing) equals held.sent then
+        evaluate drop with server being server, slot being slot
+    end when
+    give nothing
+end paragraph
+
 absorb receives server as engine, slot as number, piece as text returns nothing begin paragraph
     value held is server.connections at slot
     value whole is held.gathered plus piece
     value now-at is now in milliseconds
-    when (nil.std.text::length with s being whole) is greater than request-limit then
-        !!! Refused by closing rather than by answering 413: the request is
-        !!! still arriving, and a response written into a stream the client is
-        !!! still filling is a response it may never read.
-        evaluate drop with server being server, slot being slot
+    !!! One additional read may contain the next request. Bound that surplus
+    !!! independently; the pure framer applies request-limit to this request.
+    when (nil.std.text::length with s being whole) is greater than request-limit plus chunk-size then
+        evaluate reject-frame with server being server, slot being slot, status being 413
         give nothing
     end when
-    set server.connections at slot to build connection with handle being held.handle,
-        gathered being whole, outgoing being held.outgoing, sent being held.sent,
-        served being held.served, live being true, keeping being held.keeping,
-        started-at being held.started-at, touched-at being now-at, peer being held.peer
+    when held.gathered equals "" then set held.started-at to now-at end when
+    set held.gathered to whole
+    set held.touched-at to now-at
     give nothing
 end paragraph
 
-
-!!! --- The first connection holding a complete request.
-
+!!! --- Consume exactly one frame. Dispatch waits for the previous response;
+!!! the remaining bytes retain their arrival time and survive response writes.
 first-framed receives server as engine returns pumped begin paragraph
     variable index as number is 0
     repeat while index is less than the length of server.connections
         value held is server.connections at index
-        value waiting is held.live and (nil.std.text::length with s being held.outgoing) equals held.sent
+        value waiting is held.live and not held.serving
+            and (nil.std.text::length with s being held.outgoing) equals held.sent
         when waiting and not (held.gathered equals "") then
-            when request-is-complete with message being held.gathered then
+            value framed is inspect-frame with message being held.gathered, maximum being request-limit
+            when framed.status is greater than 0 then
+                evaluate reject-frame with server being server, slot being index, status being framed.status
+            end when
+            when framed.complete then
+                value remaining is (nil.std.text::length with s being held.gathered) minus framed.consumed
+                set held.gathered to nil.std.text::substring with s being held.gathered,
+                    start being framed.consumed, length being remaining
+                !!! Conservatively retain the first buffered byte time for
+                !!! surplus; only an empty-buffer absorb starts a new deadline.
+                set held.serving to true
                 give build pumped with found being true, handle being held.handle,
-                    request being held.gathered,
-                    keep-alive being (wants-keep-alive with message being held.gathered),
+                    request being framed.message, keep-alive being framed.keeping,
                     peer being held.peer
+            end when
+            when framed.status equals 0 and not framed.complete and held.input-closed then
+                evaluate drop with server being server, slot being index
             end when
         end when
         set index to index plus 1
@@ -412,6 +447,33 @@ first-framed receives server as engine returns pumped begin paragraph
     give nothing-found with nothing
 end paragraph
 
+reject-frame receives server as engine, slot as number, status as number returns nothing begin paragraph
+    value held is server.connections at slot
+    when not held.live then give nothing end when
+    value reason is switch status
+        case 413 then stop switching with "Content Too Large"
+        case 417 then stop switching with "Expectation Failed"
+        case 501 then stop switching with "Not Implemented"
+        case 505 then stop switching with "HTTP Version Not Supported"
+        otherwise stop switching with "Bad Request"
+    end switch
+    value ending is crlf with nothing
+    value response is "HTTP/1.1 " plus (status becomes text) plus " " plus reason plus ending
+        plus "Content-Length: 0" plus ending plus "Connection: close" plus ending plus ending
+    set held.gathered to ""
+    set held.serving to false
+    set server.rejected-total to server.rejected-total plus 1
+    when (nil.std.text::length with s being held.outgoing) is greater than held.sent then
+        !!! Preserve any preceding status/body already on the wire. Queue this
+        !!! rejection after it and close when both responses have drained.
+        set held.outgoing to held.outgoing plus response
+        set held.keeping to false
+        evaluate push-outgoing with server being server, slot being slot
+        give nothing
+    end when
+    evaluate reply with server being server, handle being held.handle, response being response, keep-open being false
+    give nothing
+end paragraph
 
 !!! --- Answer a request and either keep the connection or close it.
 !!!
@@ -427,11 +489,12 @@ public reply receives server as engine, handle as number, response as text, keep
     value held is server.connections at slot
     value now-at is now in milliseconds
     value more-allowed is held.served plus 1 is less than keep-alive-limit
-    set server.connections at slot to build connection with handle being handle,
-        gathered being "", outgoing being response, sent being 0,
-        served being held.served plus 1, live being true,
-        keeping being keep-open and more-allowed,
-        started-at being now-at, touched-at being now-at, peer being held.peer
+    set held.outgoing to response
+    set held.sent to 0
+    set held.served to held.served plus 1
+    set held.keeping to keep-open and more-allowed
+    set held.serving to false
+    set held.touched-at to now-at
     set server.served-total to server.served-total plus 1
     evaluate push-outgoing with server being server, slot being slot
     give nothing
@@ -463,10 +526,8 @@ push-outgoing receives server as engine, slot as number returns nothing begin pa
             value moved is when amount is less than 0 give 0 otherwise give amount end when
             value now-sent is held.sent plus moved
             value now-at is now in milliseconds
-            set server.connections at slot to build connection with handle being held.handle,
-                gathered being held.gathered, outgoing being held.outgoing, sent being now-sent,
-                served being held.served, live being true, keeping being held.keeping,
-                started-at being held.started-at, touched-at being now-at, peer being held.peer
+            set held.sent to now-sent
+            set held.touched-at to now-at
             when now-sent is less than width then
                 !!! More to go. Watch for writability so the next pass carries
                 !!! on, rather than spinning on a socket that is full.
@@ -484,17 +545,17 @@ end paragraph
 
 finish-response receives server as engine, slot as number returns nothing begin paragraph
     value held is server.connections at slot
-    when not held.keeping then
+    when not held.keeping or (held.input-closed and held.gathered equals "") then
         evaluate drop with server being server, slot being slot
         give nothing
     end when
-    !!! Kept open for another request: clear the response, read again.
-    value now-at is now in milliseconds
-    set server.connections at slot to build connection with handle being held.handle,
-        gathered being "", outgoing being "", sent being 0, served being held.served,
-        live being true, keeping being true, started-at being now-at, touched-at being now-at,
-        peer being held.peer
-    evaluate nil.std.net::watch with handle being held.handle, flags being nil.std.net::ready_readable
+    set held.outgoing to ""
+    set held.sent to 0
+    !!! Do not reset started-at: a partial pipelined request may already have
+    !!! waited while the preceding response was being drained.
+    when not held.input-closed then
+        evaluate nil.std.net::watch with handle being held.handle, flags being nil.std.net::ready_readable
+    end when
     give nothing
 end paragraph
 
@@ -508,7 +569,8 @@ drop receives server as engine, slot as number returns nothing begin paragraph
     evaluate nil.std.net::close with handle being held.handle
     set server.connections at slot to build connection with handle being 0, gathered being "",
         outgoing being "", sent being 0, served being 0, live being false, keeping being false,
-        started-at being 0, touched-at being 0, peer being ""
+        started-at being 0, touched-at being 0,
+        input-closed being true, serving being false, peer being ""
     set server.open-count to server.open-count minus 1
     give nothing
 end paragraph
@@ -554,97 +616,15 @@ end paragraph
 !!! server ends up holding connections no client will ever use again.
 
 public wants-keep-alive receives message as text returns boolean begin paragraph
-    value head is head-of with message being message
-    value stated is nil.std.text::to_lower with s being
-        (field-in with head being head, name being "Connection")
-    value first-line is before-first with input being head, separator being newline
-    value old-version is nil.std.text::contains with s being first-line, needle being "HTTP/1.0"
-    when nil.std.text::contains with s being stated, needle being "close" then
-        give false
-    end when
-    when old-version then
-        give nil.std.text::contains with s being stated, needle being "keep-alive"
-    end when
-    give true
+    value framed is inspect-frame with message being message, maximum being request-limit
+    give framed.complete and framed.keeping
 end paragraph
 
-
-field-in receives head as text, name as text returns text begin paragraph
-    value lines is split-on with input being head, separator being newline
-    repeat for each line in lines
-        value trimmed is nil.std.text::trim with s being line
-        value found is nil.std.text::trim with s being (before-first with input being trimmed, separator being ":")
-        when same-folded with left being found, right being name then
-            give nil.std.text::trim with s being (after-first with input being trimmed, separator being ":")
-        end when
-    end repeat
-    give ""
-end paragraph
-
-
-head-of receives message as text returns text begin paragraph
-    value marker is (crlf with nothing) plus (crlf with nothing)
-    value cut is nil.std.text::index_of with s being message, needle being marker
-    when cut is at least 0 then
-        give nil.std.text::substring with s being message, start being 0, length being cut
-    end when
-    value loose is nil.std.text::index_of with s being message, needle being newline plus newline
-    when loose is at least 0 then
-        give nil.std.text::substring with s being message, start being 0, length being loose
-    end when
-    give message
-end paragraph
-
-
-!!! --- Whether enough of the message has arrived to answer it.
-!!!
-!!! The header section ends at the first blank line. After that a body is
-!!! expected only if Content-Length says so. Chunked transfer encoding is not
-!!! accepted, and a request asking for it is answered by the layer above
-!!! rather than waited on here.
-
+!!! Compatibility query: invalid framing is never a complete request.
+!!! Call inspect-frame when the rejection status or exact boundary is needed.
 public request-is-complete receives message as text returns boolean begin paragraph
-    value marker is (crlf with nothing) plus (crlf with nothing)
-    variable head-length as number is nil.std.text::index_of with s being message, needle being marker
-    variable separator as number is 4
-    when head-length is less than 0 then
-        set head-length to nil.std.text::index_of with s being message, needle being newline plus newline
-        set separator to 2
-    end when
-    when head-length is less than 0 then
-        give false
-    end when
-
-    value head is nil.std.text::substring with s being message, start being 0, length being head-length
-    value declared is digits-value with digits being (field-in with head being head, name being "Content-Length")
-    when declared is at most 0 then
-        give true
-    end when
-    value body-start is head-length plus separator
-    give ((nil.std.text::length with s being message) minus body-start) is at least declared
-end paragraph
-
-
-!!! --- A decimal count, without borrowing a parser that raises on bad input.
-!!! Anything that is not all digits is zero: a Content-Length a client made up
-!!! must not be able to stop the server with a fault.
-
-digits-value receives digits as text returns number begin paragraph
-    value width is nil.std.text::length with s being digits
-    when width is less than 1 or width is greater than 18 then
-        give 0
-    end when
-    variable total as number is 0
-    variable index as number is 0
-    repeat while index is less than width
-        value code is nil.std.text::byte_at with s being digits, index being index
-        when code is less than 48 or code is greater than 57 then
-            give 0
-        end when
-        set total to (total times 10) plus (code minus 48)
-        set index to index plus 1
-    end repeat
-    give total
+    value framed is inspect-frame with message being message, maximum being request-limit
+    give framed.complete
 end paragraph
 
 

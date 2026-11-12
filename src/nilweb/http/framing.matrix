@@ -1,0 +1,393 @@
+!!! Bounded HTTP/1 wire framing (RFC 9112 sections 5 through 7).
+!!!
+!!! A frame reports the exact number of wire octets consumed. Any following
+!!! request belongs to the connection buffer, never to this request's body.
+!!! Chunked content is decoded and normalized to Content-Length for handlers;
+!!! trailers are validated and discarded, never merged into trusted headers.
+!!! Status zero means either complete or waiting. Every nonzero status must
+!!! be answered with Connection: close, without dispatching an application.
+!!!
+!!! Expect negotiation is deliberately unsupported: a complete HTTP/1.1
+!!! header section containing Expect receives 417 immediately, without waiting
+!!! for content or sending an interim 100. A client can retry without Expect.
+!!! RFC 9110 section 10.1.1 requires HTTP/1.0's 100-continue expectation to be
+!!! ignored; other HTTP/1.0 expectations receive 417 as well.
+
+book nilweb.http.framing
+
+read nil.std.core
+read nil.std.text
+read everything from nilweb.text.scan
+read everything from nilweb.http.headers
+
+public wire-frame begin record
+    field complete as boolean
+    field status as number
+    field consumed as number
+    field message as text
+    field keeping as boolean
+end record
+
+counted-size begin record
+    field valid as boolean
+    field oversized as boolean
+    field amount as number
+end record
+
+frame-state receives status as number returns wire-frame begin paragraph
+    give build wire-frame with complete being false, status being status,
+        consumed being 0, message being "", keeping being false
+end paragraph
+
+trim-ows receives input as text returns text begin paragraph
+    variable first as number is 0
+    variable after as number is nil.std.text::length with s being input
+    repeat while first is less than after
+        value code is nil.std.text::byte_at with s being input, index being first
+        when not (code equals 32 or code equals 9) then stop repeating end when
+        set first to first plus 1
+    end repeat
+    repeat while after is greater than first
+        value code is nil.std.text::byte_at with s being input, index being after minus 1
+        when not (code equals 32 or code equals 9) then stop repeating end when
+        set after to after minus 1
+    end repeat
+    give nil.std.text::substring with s being input, start being first, length being after minus first
+end paragraph
+
+is-token-byte receives code as number returns boolean begin paragraph
+    when code is at least 48 and code is at most 57 then give true end when
+    when code is at least 65 and code is at most 90 then give true end when
+    when code is at least 97 and code is at most 122 then give true end when
+    give code equals 33 or code equals 35 or code equals 36 or code equals 37
+        or code equals 38 or code equals 39 or code equals 42 or code equals 43
+        or code equals 45 or code equals 46 or code equals 94 or code equals 95
+        or code equals 96 or code equals 124 or code equals 126
+end paragraph
+
+is-token receives input as text returns boolean begin paragraph
+    value width is nil.std.text::length with s being input
+    when width equals 0 then give false end when
+    variable index as number is 0
+    repeat while index is less than width
+        when not (is-token-byte with code being
+            (nil.std.text::byte_at with s being input, index being index)) then give false end when
+        set index to index plus 1
+    end repeat
+    give true
+end paragraph
+
+valid-field-line receives line as text returns boolean begin paragraph
+    value colon is nil.std.text::index_of with s being line, needle being ":"
+    when colon is less than 1 then give false end when
+    value name is nil.std.text::substring with s being line, start being 0, length being colon
+    when not (is-token with input being name) then give false end when
+    variable index as number is colon plus 1
+    repeat while index is less than (nil.std.text::length with s being line)
+        value code is nil.std.text::byte_at with s being line, index being index
+        when (code is less than 32 and not (code equals 9)) or code equals 127 then give false end when
+        set index to index plus 1
+    end repeat
+    give true
+end paragraph
+
+bounded-size receives digits as text, radix as number, maximum as number returns counted-size begin paragraph
+    variable total as number is 0
+    variable oversized as boolean is false
+    value width is nil.std.text::length with s being digits
+    when width equals 0 then
+        give build counted-size with valid being false, oversized being false, amount being 0
+    end when
+    variable index as number is 0
+    repeat while index is less than width
+        value code is nil.std.text::byte_at with s being digits, index being index
+        variable digit as number is 0 minus 1
+        when code is at least 48 and code is at most 57 then set digit to code minus 48 end when
+        when radix equals 16 and code is at least 65 and code is at most 70 then set digit to code minus 55 end when
+        when radix equals 16 and code is at least 97 and code is at most 102 then set digit to code minus 87 end when
+        when digit is less than 0 then
+            give build counted-size with valid being false, oversized being false, amount being 0
+        end when
+        when not oversized then
+            when total is greater than (maximum over radix)
+                or (total equals (maximum over radix) and digit is greater than (maximum remainder radix)) then
+                set oversized to true
+            otherwise
+                set total to (total times radix) plus digit
+            end when
+        end when
+        set index to index plus 1
+    end repeat
+    give build counted-size with valid being true, oversized being oversized, amount being total
+end paragraph
+
+!!! Validate ignored chunk extensions, including quoted values and escapes.
+valid-extensions receives input as text returns boolean begin paragraph
+    value width is nil.std.text::length with s being input
+    variable index as number is 0
+    repeat while index is less than width
+        repeat while index is less than width
+            value code is nil.std.text::byte_at with s being input, index being index
+            when not (code equals 32 or code equals 9) then stop repeating end when
+            set index to index plus 1
+        end repeat
+        when index equals width then give false end when
+        when not ((nil.std.text::byte_at with s being input, index being index) equals 59) then give false end when
+        set index to index plus 1
+        repeat while index is less than width
+            value code is nil.std.text::byte_at with s being input, index being index
+            when not (code equals 32 or code equals 9) then stop repeating end when
+            set index to index plus 1
+        end repeat
+        value name-start is index
+        repeat while index is less than width
+            when not (is-token-byte with code being (nil.std.text::byte_at with s being input, index being index)) then stop repeating end when
+            set index to index plus 1
+        end repeat
+        when index equals name-start then give false end when
+        repeat while index is less than width
+            value code is nil.std.text::byte_at with s being input, index being index
+            when not (code equals 32 or code equals 9) then stop repeating end when
+            set index to index plus 1
+        end repeat
+        when index is less than width and (nil.std.text::byte_at with s being input, index being index) equals 61 then
+            set index to index plus 1
+            repeat while index is less than width
+                value code is nil.std.text::byte_at with s being input, index being index
+                when not (code equals 32 or code equals 9) then stop repeating end when
+                set index to index plus 1
+            end repeat
+            when index equals width then give false end when
+            when (nil.std.text::byte_at with s being input, index being index) equals 34 then
+                set index to index plus 1
+                variable closed as boolean is false
+                repeat while index is less than width
+                    value code is nil.std.text::byte_at with s being input, index being index
+                    set index to index plus 1
+                    when code equals 34 then
+                        set closed to true
+                        stop repeating
+                    end when
+                    when code equals 92 then
+                        when index equals width then give false end when
+                        value escaped is nil.std.text::byte_at with s being input, index being index
+                        when (escaped is less than 32 and not (escaped equals 9)) or escaped equals 127 then give false end when
+                        set index to index plus 1
+                    end when
+                    when not (code equals 92) and ((code is less than 32 and not (code equals 9)) or code equals 127) then give false end when
+                end repeat
+                when not closed then give false end when
+            otherwise
+                value value-start is index
+                repeat while index is less than width
+                    when not (is-token-byte with code being (nil.std.text::byte_at with s being input, index being index)) then stop repeating end when
+                    set index to index plus 1
+                end repeat
+                when index equals value-start then give false end when
+            end when
+        end when
+    end repeat
+    give true
+end paragraph
+
+!!! A fragmented line may end in CR, but bare LF or CR followed by another
+!!! byte is already invalid. Stop at its first complete CRLF, before payload.
+valid-line-prefix receives input as text returns boolean begin paragraph
+    value width is nil.std.text::length with s being input
+    variable index as number is 0
+    repeat while index is less than width
+        value code is nil.std.text::byte_at with s being input, index being index
+        when code equals 10 then give false end when
+        when code equals 13 then
+            when index plus 1 equals width then give true end when
+            give (nil.std.text::byte_at with s being input, index being index plus 1) equals 10
+        end when
+        set index to index plus 1
+    end repeat
+    give true
+end paragraph
+
+chunk-frame receives message as text, head as text, after as number,
+    maximum as number, keeping as boolean returns wire-frame begin paragraph
+    value ending is crlf with nothing
+    value width is nil.std.text::length with s being message
+    variable offset as number is after
+    variable body as text is ""
+    repeat forever
+        value remaining is nil.std.text::substring with s being message, start being offset, length being width minus offset
+        when not (valid-line-prefix with input being remaining) then give frame-state with status being 400 end when
+        value end-line is nil.std.text::index_of with s being remaining, needle being ending
+        when end-line is less than 0 then
+            when width is at least maximum or (width minus offset) is greater than 8192 then give frame-state with status being 413 end when
+            give frame-state with status being 0
+        end when
+        when end-line is greater than 8192 then give frame-state with status being 413 end when
+        value line is nil.std.text::substring with s being remaining, start being 0, length being end-line
+        value semicolon is nil.std.text::index_of with s being line, needle being ";"
+        variable numeral as text is line
+        when semicolon is at least 0 then
+            value before is nil.std.text::substring with s being line, start being 0, length being semicolon
+            set numeral to trim-ows with input being before
+            value extensions is nil.std.text::substring with s being line, start being (nil.std.text::length with s being numeral),
+                length being end-line minus (nil.std.text::length with s being numeral)
+            when not (valid-extensions with input being extensions) then give frame-state with status being 400 end when
+        end when
+        value counted is bounded-size with digits being numeral, radix being 16, maximum being maximum
+        when not counted.valid then give frame-state with status being 400 end when
+        when counted.oversized then give frame-state with status being 413 end when
+        set offset to offset plus end-line plus 2
+        when offset is greater than maximum then give frame-state with status being 413 end when
+        when counted.amount equals 0 then
+            repeat forever
+                value trailer-rest is nil.std.text::substring with s being message, start being offset, length being width minus offset
+                when not (valid-line-prefix with input being trailer-rest) then give frame-state with status being 400 end when
+                value trailer-end is nil.std.text::index_of with s being trailer-rest, needle being ending
+                when trailer-end is less than 0 then
+                    when width is at least maximum then give frame-state with status being 413 end when
+                    give frame-state with status being 0
+                end when
+                value trailer is nil.std.text::substring with s being trailer-rest, start being 0, length being trailer-end
+                set offset to offset plus trailer-end plus 2
+                when offset is greater than maximum then give frame-state with status being 413 end when
+                when trailer-end equals 0 then
+                    value normalized is head plus "Content-Length: " plus ((nil.std.text::length with s being body) becomes text)
+                        plus ending plus ending plus body
+                    give build wire-frame with complete being true, status being 0, consumed being offset,
+                        message being normalized, keeping being keeping
+                end when
+                when not (valid-field-line with line being trailer) then give frame-state with status being 400 end when
+            end repeat
+        end when
+        when counted.amount is greater than maximum minus offset minus 2 then give frame-state with status being 413 end when
+        value chunk-after is offset plus counted.amount
+        when width is less than chunk-after plus 2 then give frame-state with status being 0 end when
+        when not ((nil.std.text::substring with s being message, start being chunk-after, length being 2) equals ending) then
+            give frame-state with status being 400
+        end when
+        set body to body plus (nil.std.text::substring with s being message, start being offset, length being counted.amount)
+        set offset to chunk-after plus 2
+    end repeat
+    give frame-state with status being 400
+end paragraph
+
+public inspect-frame receives message as text, maximum as number returns wire-frame begin paragraph
+    value ending is crlf with nothing
+    value width is nil.std.text::length with s being message
+    value cut is nil.std.text::index_of with s being message, needle being ending plus ending
+    when cut is less than 0 then
+        !!! Reject bare LF and stray CR as soon as they are unambiguous; a
+        !!! final CR may still receive its LF in the next socket fragment.
+        variable index as number is 0
+        repeat while index is less than width
+            value code is nil.std.text::byte_at with s being message, index being index
+            when code equals 10 then
+                when index equals 0 then give frame-state with status being 400 end when
+                when not ((nil.std.text::byte_at with s being message, index being index minus 1) equals 13) then give frame-state with status being 400 end when
+            end when
+            when code equals 13 and index plus 1 is less than width then
+                when not ((nil.std.text::byte_at with s being message, index being index plus 1) equals 10) then give frame-state with status being 400 end when
+            end when
+            set index to index plus 1
+        end repeat
+        when width is at least maximum then give frame-state with status being 413 end when
+        give frame-state with status being 0
+    end when
+    value after is cut plus 4
+    when after is greater than maximum then give frame-state with status being 413 end when
+    value raw-head is nil.std.text::substring with s being message, start being 0, length being cut
+    value lines is split-on with input being raw-head, separator being ending
+    value first-line is lines at 0
+    value words is split-on with input being first-line, separator being " "
+    when not ((the length of words) equals 3) then give frame-state with status being 400 end when
+    when not (is-token with input being words at 0) or (words at 1) equals "" then give frame-state with status being 400 end when
+    variable byte-index as number is 0
+    repeat while byte-index is less than (nil.std.text::length with s being first-line)
+        value code is nil.std.text::byte_at with s being first-line, index being byte-index
+        when code is less than 32 or code equals 127 then give frame-state with status being 400 end when
+        set byte-index to byte-index plus 1
+    end repeat
+    value version is words at 2
+    when not (version equals "HTTP/1.1" or version equals "HTTP/1.0") then give frame-state with status being 505 end when
+    variable normalized as text is first-line plus ending
+    variable declared as number is 0 minus 1
+    variable has-length as boolean is false
+    variable too-large as boolean is false
+    variable codings as array of text is []
+    variable has-coding as boolean is false
+    variable has-expectation as boolean is false
+    variable unsupported-expectation as boolean is false
+    variable wants-close as boolean is false
+    variable wants-keep as boolean is false
+    variable line-index as number is 1
+    repeat while line-index is less than the length of lines
+        value line is lines at line-index
+        when not (valid-field-line with line being line) then give frame-state with status being 400 end when
+        value name is nil.std.text::to_lower with s being (before-first with input being line, separator being ":")
+        value content is trim-ows with input being (after-first with input being line, separator being ":")
+        when name equals "content-length" then
+            set has-length to true
+            value counts is split-on with input being content, separator being ","
+            repeat for each count-text in counts
+                value count is bounded-size with digits being (trim-ows with input being count-text), radix being 10, maximum being maximum
+                when not count.valid then give frame-state with status being 400 end when
+                when count.oversized then set too-large to true end when
+                when declared is at least 0 and not (declared equals count.amount) then give frame-state with status being 400 end when
+                set declared to count.amount
+            end repeat
+        end when
+        when name equals "transfer-encoding" then
+                set has-coding to true
+                value pieces is split-on with input being content, separator being ","
+                repeat for each piece in pieces
+                    value coding is nil.std.text::to_lower with s being (trim-ows with input being piece)
+                    when not (is-token with input being coding) then give frame-state with status being 400 end when
+                    append coding to codings
+                end repeat
+        end when
+        when not (name equals "content-length" or name equals "transfer-encoding" or name equals "trailer") then
+            set normalized to normalized plus line plus ending
+        end when
+        when name equals "expect" then
+            set has-expectation to true
+            value expectations is split-on with input being content, separator being ","
+            repeat for each expectation in expectations
+                value wanted is nil.std.text::to_lower with s being (trim-ows with input being expectation)
+                when not (wanted equals "100-continue") then set unsupported-expectation to true end when
+            end repeat
+        end when
+        when name equals "connection" then
+            value tokens is split-on with input being content, separator being ","
+            repeat for each token in tokens
+                value directive is nil.std.text::to_lower with s being (trim-ows with input being token)
+                when directive equals "close" then set wants-close to true end when
+                when directive equals "keep-alive" then set wants-keep to true end when
+            end repeat
+        end when
+        set line-index to line-index plus 1
+    end repeat
+    when has-length and has-coding then give frame-state with status being 400 end when
+    when has-expectation and (version equals "HTTP/1.1" or unsupported-expectation) then
+        give frame-state with status being 417
+    end when
+    value keeping is not wants-close and (version equals "HTTP/1.1" or wants-keep)
+    when has-coding then
+        when version equals "HTTP/1.0" then give frame-state with status being 400 end when
+        when not ((codings at ((the length of codings) minus 1)) equals "chunked") then give frame-state with status being 400 end when
+        variable chunks as number is 0
+        repeat for each coding in codings
+            when coding equals "chunked" then set chunks to chunks plus 1 end when
+        end repeat
+        when chunks is greater than 1 then give frame-state with status being 400 end when
+        when (the length of codings) is greater than 1 then give frame-state with status being 501 end when
+        give chunk-frame with message being message, head being normalized, after being after, maximum being maximum, keeping being keeping
+    end when
+    when too-large then give frame-state with status being 413 end when
+    when not has-length then set declared to 0 end when
+    when declared is greater than maximum minus after then give frame-state with status being 413 end when
+    value consumed is after plus declared
+    when width is less than consumed then give frame-state with status being 0 end when
+    when has-length then set normalized to normalized plus "Content-Length: " plus (declared becomes text) plus ending end when
+    set normalized to normalized plus ending plus (nil.std.text::substring with s being message, start being after, length being declared)
+    give build wire-frame with complete being true, status being 0, consumed being consumed,
+        message being normalized, keeping being keeping
+end paragraph
