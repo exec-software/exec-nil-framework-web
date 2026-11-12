@@ -26,6 +26,7 @@ REPO = Path(__file__).resolve().parents[1]
 UNIT_CHECKS = 1128
 WIRE_CHECKS = 38  # Includes the real first-byte deadline check.
 STATIC_CHECKS = 15
+WIRE_ORACLE_CHECKS = 16
 HOST_CHECKS = {"Linux": 87, "Darwin": 87, "Windows": 90}
 
 
@@ -252,6 +253,23 @@ def verify_unit_output(text: str):
             "full suite contains a failure or skipped check")
 
 
+def verify_wire_oracle_output(text: str):
+    totals = re.findall(r"^Ran (\d+) tests in \d+(?:\.\d+)?s$", text, re.MULTILINE)
+    require(totals == [str(WIRE_ORACLE_CHECKS)], "wire-oracle total does not match the exact inventory")
+    passed = re.findall(r"^(test_[^\r\n]+) \.\.\. ok$", text, re.MULTILINE)
+    require(len(passed) == WIRE_ORACLE_CHECKS and len(set(passed)) == WIRE_ORACLE_CHECKS,
+            "wire-oracle per-test results include a failure, duplicate or skip")
+    require(text.strip().splitlines()[-1] == "OK", "wire-oracle summary contains a failure or skip")
+
+
+def run_wire_oracle(*, env: dict[str, str], evidence: Path) -> dict:
+    result = run([sys.executable, "-B", str(REPO / "tests/test_http_wire_oracle.py"), "-v"],
+                 cwd=REPO, env=env, evidence=evidence, label="wire-oracle", timeout=30)
+    verify_wire_oracle_output((evidence / "wire-oracle.stderr").read_text())
+    result["checks"] = WIRE_ORACLE_CHECKS
+    return result
+
+
 def verify_wire_report(report: dict, *, schema: str, expected: int, roots: list[Path]):
     require(report.get("schema") == schema and report.get("status") == "PASS", "wire report schema or outcome differs")
     require(report.get("source_unchanged") is True and report.get("tools_unchanged") is True,
@@ -310,7 +328,7 @@ def main() -> int:
     report = {"schema": "nilweb.platform.v1", "status": "FAIL", "system": platform.system(),
               "machine": normalized_machine(), "python": sys.version, "roots": [],
               "expected": {"unit_checks_per_root": UNIT_CHECKS, "wire_checks_per_root": WIRE_CHECKS,
-                           "static_checks_per_root": STATIC_CHECKS},
+                           "static_checks_per_root": STATIC_CHECKS, "wire_oracle_checks": WIRE_ORACLE_CHECKS},
               "scope": "host file contract and interpreter web consumers; no native networking or installed SDK qualification"}
     pins, tools, roots_before = {}, {}, {}
     roots = []
@@ -355,6 +373,7 @@ def main() -> int:
             verify_unit_output((evidence / f"unit-{index}.stdout").read_text())
             require(not (REPO / "build/static-http-contract-fixture.bin").exists(), "full-suite owned fixture was not cleaned up")
             row.update(checks=UNIT_CHECKS, bytecode_sha256=digest(bytecode), cleanup_verified=True)
+        report["wire_oracle"] = run_wire_oracle(env=env, evidence=evidence)
         common = ["--compiler", str(args.compiler), "--interpreter", str(args.interpreter)]
         for root in roots:
             common += ["--nilstd", str(root)]

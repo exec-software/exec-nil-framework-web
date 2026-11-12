@@ -44,6 +44,17 @@ jobs:
           "$RUNNER_TEMP/source-scanner/gitleaks" git . "${flags[@]}"
       - name: Verify path-audit detection and safe diagnostics
         run: python3 -B tests/test_audit_paths.py
+      - name: Verify wire closure and deadline test oracles
+        run: |
+          python3 -B - <<'PY'
+          import json, os, runpy, tempfile
+          from pathlib import Path
+          driver = runpy.run_path('scripts/test-platform.py')
+          env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
+          with tempfile.TemporaryDirectory(prefix='nilweb-wire-oracle-') as output:
+              result = driver['run_wire_oracle'](env=env, evidence=Path(output))
+              print(json.dumps(dict(checks=result['checks'], cleanup_verified=result['cleanup_verified'])))
+          PY
       - name: Refuse absolute paths, routable addresses and contact details
         shell: bash
         run: |

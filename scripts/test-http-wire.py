@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import socket
 import subprocess
@@ -33,6 +34,13 @@ def pin_tree(root: Path) -> dict[str, str]:
 
 def request(target: bytes, fields: bytes = b"", body: bytes = b"", method: bytes = b"GET") -> bytes:
     return method + b" " + target + b" HTTP/1.1\r\nHost: example.com\r\n" + fields + b"\r\n" + body
+
+
+def windows_connection_aborted(error: OSError) -> bool:
+    # WSAECONNABORTED is a closed connection, not a successful socket timeout.
+    # Keep this exception specific to Winsock; other abort/error codes fail.
+    return (os.name == "nt" and isinstance(error, ConnectionAbortedError)
+            and getattr(error, "winerror", None) == 10053)
 
 
 class Peer:
@@ -82,7 +90,9 @@ class Peer:
             raise AssertionError("extra response bytes after close")
         try:
             data = self.socket.recv(1)
-        except ConnectionResetError:
+        except OSError as error:
+            if not isinstance(error, ConnectionResetError) and not windows_connection_aborted(error):
+                raise
             data = b""
         if data:
             raise AssertionError("connection was reused after rejection/close")
@@ -92,6 +102,36 @@ def check_response(peer: Peer, expected: bytes):
     status, _, body = peer.response()
     if status != 200 or body != expected:
         raise AssertionError("response status or exact payload differs")
+
+
+def check_first_byte_deadline(peer: Peer):
+    started = time.monotonic()
+    peer.send(b"POST /slow HTTP/1.1\r\nHost: example.com\r\nX-Slow: ")
+    next_fragment = started + 3
+    until = started + 25
+    while True:
+        now = time.monotonic()
+        if now >= until:
+            raise AssertionError("request deadline extended by fragments")
+        # Observe FIN/reset as soon as it arrives. Sleeping until the next send
+        # could hide an early close behind buffered successful socket writes.
+        ready, _, _ = select.select([peer.socket], [], [], min(next_fragment, until) - now)
+        if ready:
+            peer.closed()
+            break
+        now = time.monotonic()
+        if now >= next_fragment:
+            try:
+                peer.send(b"x")
+            except OSError as error:
+                if not isinstance(error, (BrokenPipeError, ConnectionResetError)) and not windows_connection_aborted(error):
+                    raise
+                peer.closed()
+                break
+            next_fragment = now + 3
+    elapsed = time.monotonic() - started
+    if not 19 <= elapsed <= 25:
+        raise AssertionError("request closed outside the 19–25 second first-byte deadline window")
 
 
 def exercise(port: int, rows: list[dict], real_deadline: bool):
@@ -293,17 +333,7 @@ def exercise(port: int, rows: list[dict], real_deadline: bool):
     if real_deadline:
         def deadline():
             with Peer(port) as peer:
-                peer.send(b"POST /slow HTTP/1.1\r\nHost: example.com\r\nX-Slow: ")
-                started = time.monotonic()
-                for _ in range(7):
-                    time.sleep(3)
-                    try:
-                        peer.send(b"x")
-                    except (BrokenPipeError, ConnectionResetError):
-                        break
-                peer.closed()
-                if time.monotonic() - started > 25:
-                    raise AssertionError("request deadline extended by fragments")
+                check_first_byte_deadline(peer)
         case("real first-byte deadline survives continuing fragments", deadline)
 
 
@@ -342,7 +372,7 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--parent-process-group", action="store_true",
                         help="inherit the outer driver process group; clean up only the owned server PID")
-    parser.add_argument("--real-deadline", action="store_true", help="also run the bounded 21-second drip check per root")
+    parser.add_argument("--real-deadline", action="store_true", help="also verify the 20-second first-byte deadline per root")
     args = parser.parse_args()
     args.output = args.output.resolve()
     if args.output == REPO or REPO in args.output.parents:
