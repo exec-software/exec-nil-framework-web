@@ -14,11 +14,14 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-All 1,128 current checks pass through the NIL interpreter on Linux with the
-framework's rooted-file snapshot APIs. Real loopback tests also cover request
-framing, pipelines, binary static content and filesystem-link rejection.
-Four-platform CI builds the pinned framework revision and repeats these checks;
-a source-level pass does not by itself qualify a published SDK.
+The current server passes on Linux, Windows, Intel macOS and Apple Silicon
+macOS: 1,128 unit checks, 38 real-wire checks, 15 static HTTP checks and 16
+deadline-oracle controls on each host. The
+[four-platform run](https://github.com/exec-software/exec-nil-framework-web/actions/runs/43162279298)
+also verifies rooted-file behavior, unchanged inputs and owned-process cleanup.
+These checks run through the NIL interpreter against a pinned framework source
+build; they do not qualify a published SDK or native networking. All four
+platform checks and the source-security audit are required for public changes.
 
 | Module | What it does | State |
 | --- | --- | --- |
