@@ -1,0 +1,303 @@
+!!! Conditional and range semantics exercised through complete static responses.
+book nilweb.tests.static_http
+
+read nil.std.text
+read nil.std.io.file
+read nil.std.core
+read everything from nilweb.tests.harness
+read everything from nilweb.http.headers
+read everything from nilweb.http.method
+read everything from nilweb.http.request
+read everything from nilweb.http.response
+read everything from nilweb.http.status
+read everything from nilweb.static.files
+read everything from nilweb.time.clock
+read everything from nilweb.text.scan
+
+
+asset receives fields as array of header-field, verb as request-method returns http-response begin paragraph
+    value request is make-request with verb being verb, target being "/assets/app.css", fields being fields, body being ""
+    give serve-static with root being "tests/public", path being request.path, request being request, seconds being 60
+end paragraph
+
+
+one-field receives name as text, content as text returns array of header-field begin paragraph
+    give set-field with fields being (no-headers with nothing), name being name, content being content
+end paragraph
+
+
+expect-code receives label as text, fields as array of header-field, verb as request-method,
+    expected as number returns nothing begin paragraph
+    evaluate same-number with label being label, actual being (asset with fields being fields, verb being verb).code,
+        expected being expected
+    give nothing
+end paragraph
+
+
+public run-static-http-tests returns nothing begin paragraph
+    evaluate section with title being "nilweb.static HTTP preconditions, ranges and HEAD"
+    value whole is asset with fields being (no-headers with nothing), verb being request-method.Get
+    value tag is field-value with fields being whole.fields, name being "ETag"
+    value modified is field-value with fields being whole.fields, name being "Last-Modified"
+    value old-date is http-date with at-ms being 0
+    value future-date is "Fri, 31 Dec 9999 23:59:59 GMT"
+    value stale is quote plus "old-copy" plus quote
+    value range is one-field with name being "Range", content being "bytes=0-5"
+    value past-end is one-field with name being "Range", content being "bytes=9999-"
+    evaluate same-text with label being "412 has its registered reason phrase",
+        actual being (reason-phrase with code being status-precondition-failed), expected being "Precondition Failed"
+    evaluate same-number with label being "strong SHA-256 ETag has 64 digits and two quotes",
+        actual being (nil.std.text::length with s being tag), expected being 66
+    evaluate same-text with label being "ETag identifies the exact CSS bytes",
+        actual being tag, expected being quote plus "a8755988aba6a204ea234649ac4bb76aaef7d2b5b1aa32083e835fa31ed5b61a" plus quote
+
+    variable fields is set-field with fields being range, name being "If-None-Match", content being tag
+    value cached-range is asset with fields being fields, verb being request-method.Get
+    evaluate same-number with label being "If-None-Match precedes a satisfiable Range", actual being cached-range.code, expected being 304
+    evaluate same-text with label being "304 has no partial content metadata",
+        actual being (field-value with fields being cached-range.fields, name being "Content-Range"), expected being ""
+    evaluate same-text with label being "304 retains the validator",
+        actual being (field-value with fields being cached-range.fields, name being "ETag"), expected being tag
+    evaluate same-text with label being "304 retains cache policy",
+        actual being (field-value with fields being cached-range.fields, name being "Cache-Control"), expected being "public, max-age=60"
+    evaluate same-text with label being "304 retains modification time",
+        actual being (field-value with fields being cached-range.fields, name being "Last-Modified"), expected being modified
+    set fields to set-field with fields being past-end, name being "If-None-Match", content being tag
+    evaluate expect-code with label being "If-None-Match precedes an unsatisfiable Range", fields being fields,
+        verb being request-method.Get, expected being 304
+    set fields to set-field with fields being past-end, name being "If-Modified-Since", content being modified
+    evaluate expect-code with label being "If-Modified-Since precedes an unsatisfiable Range", fields being fields,
+        verb being request-method.Get, expected being 304
+
+    set fields to set-field with fields being range, name being "If-Match", content being stale
+    evaluate expect-code with label being "If-Match failure precedes Range", fields being fields,
+        verb being request-method.Get, expected being 412
+    set fields to set-field with fields being fields, name being "If-None-Match", content being tag
+    evaluate expect-code with label being "If-Match failure precedes matching If-None-Match", fields being fields,
+        verb being request-method.Get, expected being 412
+    evaluate expect-code with label being "If-Match uses strong comparison", fields being
+        (one-field with name being "If-Match", content being "W/" plus tag), verb being request-method.Get, expected being 412
+    evaluate expect-code with label being "If-Match wildcard accepts the existing representation", fields being
+        (one-field with name being "If-Match", content being "*"), verb being request-method.Get, expected being 200
+    set fields to set-field with fields being (one-field with name being "If-Match", content being tag),
+        name being "If-Unmodified-Since", content being old-date
+    evaluate expect-code with label being "If-Match suppresses If-Unmodified-Since", fields being fields,
+        verb being request-method.Get, expected being 200
+    set fields to set-field with fields being range, name being "If-Unmodified-Since", content being old-date
+    evaluate expect-code with label being "If-Unmodified-Since failure precedes Range", fields being fields,
+        verb being request-method.Get, expected being 412
+    evaluate expect-code with label being "equal If-Unmodified-Since succeeds", fields being
+        (one-field with name being "If-Unmodified-Since", content being modified), verb being request-method.Get, expected being 200
+    evaluate expect-code with label being "invalid If-Unmodified-Since is ignored", fields being
+        (one-field with name being "If-Unmodified-Since", content being "not a date"), verb being request-method.Get, expected being 200
+    evaluate expect-code with label being "empty If-Match cannot accidentally match", fields being
+        (one-field with name being "If-Match", content being ""), verb being request-method.Get, expected being 412
+
+    set fields to set-field with fields being (one-field with name being "If-None-Match", content being stale),
+        name being "If-Modified-Since", content being future-date
+    evaluate expect-code with label being "stale If-None-Match suppresses a matching date", fields being fields,
+        verb being request-method.Get, expected being 200
+    set fields to set-field with fields being fields, name being "If-None-Match", content being ""
+    evaluate expect-code with label being "present empty If-None-Match suppresses date fallback", fields being fields,
+        verb being request-method.Get, expected being 200
+    evaluate expect-code with label being "If-None-Match weak comparison matches", fields being
+        (one-field with name being "If-None-Match", content being "W/" plus tag), verb being request-method.Get, expected being 304
+    evaluate expect-code with label being "a matching tag on POST returns 412 rather than 304", fields being
+        (one-field with name being "If-None-Match", content being tag), verb being request-method.Post, expected being 412
+    evaluate expect-code with label being "If-Modified-Since is ignored on POST", fields being
+        (one-field with name being "If-Modified-Since", content being future-date), verb being request-method.Post, expected being 200
+    evaluate expect-code with label being "preconditions are ignored on OPTIONS", fields being
+        (one-field with name being "If-Match", content being stale), verb being request-method.Options, expected being 200
+    set fields to add-field with fields being (one-field with name being "If-None-Match", content being stale),
+        name being "if-none-match", content being tag
+    evaluate expect-code with label being "repeated entity-tag fields combine as a list", fields being fields,
+        verb being request-method.Get, expected being 304
+    evaluate expect-code with label being "commas inside an opaque tag do not split the list", fields being
+        (one-field with name being "If-None-Match", content being quote plus "other,copy" plus quote plus ", " plus tag),
+        verb being request-method.Get, expected being 304
+    evaluate expect-code with label being "invalid list suffix does not partially match", fields being
+        (one-field with name being "If-None-Match", content being tag plus "garbage"), verb being request-method.Get, expected being 200
+    evaluate expect-code with label being "an unclosed quoted entity tag is not a match", fields being
+        (one-field with name being "If-None-Match", content being quote plus "other, " plus tag),
+        verb being request-method.Get, expected being 200
+    evaluate expect-code with label being "a wildcard mixed with a list is not valid If-Match", fields being
+        (one-field with name being "If-Match", content being "*, " plus tag), verb being request-method.Get, expected being 412
+
+    evaluate expect-code with label being "matching HTTP date revalidates", fields being
+        (one-field with name being "If-Modified-Since", content being modified), verb being request-method.Get, expected being 304
+    evaluate expect-code with label being "invalid date separators cannot revalidate", fields being
+        (one-field with name being "If-Modified-Since", content being "Fri; 31 Dec 9999 23:59:59 GMT"),
+        verb being request-method.Get, expected being 200
+    evaluate expect-code with label being "impossible calendar dates cannot revalidate", fields being
+        (one-field with name being "If-Modified-Since", content being "Fri, 31 Feb 9999 23:59:59 GMT"),
+        verb being request-method.Get, expected being 200
+    set fields to add-field with fields being (one-field with name being "If-Modified-Since", content being modified),
+        name being "If-Modified-Since", content being future-date
+    evaluate expect-code with label being "repeated singleton dates are ignored", fields being fields,
+        verb being request-method.Get, expected being 200
+
+    set fields to set-field with fields being range, name being "If-Range", content being tag
+    value partial is asset with fields being fields, verb being request-method.Get
+    evaluate same-number with label being "matching strong If-Range permits partial content", actual being partial.code, expected being 206
+    evaluate same-text with label being "partial body is the exact requested slice", actual being partial.body,
+        expected being (nil.std.text::substring with s being whole.body, start being 0, length being 6)
+    evaluate same-text with label being "206 retains the full representation ETag",
+        actual being (field-value with fields being partial.fields, name being "ETag"), expected being tag
+    evaluate same-text with label being "206 retains Last-Modified",
+        actual being (field-value with fields being partial.fields, name being "Last-Modified"), expected being modified
+    evaluate same-text with label being "206 retains cache policy",
+        actual being (field-value with fields being partial.fields, name being "Cache-Control"), expected being "public, max-age=60"
+    evaluate same-text with label being "206 states its representation width",
+        actual being (field-value with fields being partial.fields, name being "Content-Range"), expected being "bytes 0-5/31"
+    set fields to set-field with fields being range, name being "If-Range", content being stale
+    evaluate expect-code with label being "stale If-Range sends the full representation", fields being fields,
+        verb being request-method.Get, expected being 200
+    set fields to set-field with fields being past-end, name being "If-Range", content being stale
+    evaluate expect-code with label being "stale If-Range suppresses even an unsatisfiable Range", fields being fields,
+        verb being request-method.Get, expected being 200
+    set fields to set-field with fields being range, name being "If-Range", content being "W/" plus tag
+    evaluate expect-code with label being "weak If-Range cannot authorize a partial response", fields being fields,
+        verb being request-method.Get, expected being 200
+    set fields to set-field with fields being range, name being "If-Range", content being modified
+    evaluate expect-code with label being "second-resolution file dates cannot prove strong If-Range identity", fields being fields,
+        verb being request-method.Get, expected being 200
+    set fields to set-field with fields being range, name being "If-Range", content being ""
+    evaluate expect-code with label being "present empty If-Range falls back to full content", fields being fields,
+        verb being request-method.Get, expected being 200
+    set fields to add-field with fields being (set-field with fields being range, name being "If-Range", content being tag),
+        name being "If-Range", content being tag
+    evaluate expect-code with label being "repeated If-Range cannot authorize a partial response", fields being fields,
+        verb being request-method.Get, expected being 200
+    evaluate expect-code with label being "If-Range alone has no effect", fields being
+        (one-field with name being "If-Range", content being stale), verb being request-method.Get, expected being 200
+
+    value head is asset with fields being past-end, verb being request-method.Head
+    evaluate same-number with label being "HEAD ignores an unsatisfiable Range", actual being head.code, expected being 200
+    evaluate same-text with label being "HEAD has no Content-Range",
+        actual being (field-value with fields being head.fields, name being "Content-Range"), expected being ""
+    evaluate same-text with label being "HEAD uses the GET ETag",
+        actual being (field-value with fields being head.fields, name being "ETag"), expected being tag
+    value wire is render-response with response being head, verb being request-method.Head
+    evaluate is-true with label being "HEAD advertises the complete GET byte count",
+        actual being (nil.std.text::contains with s being wire, needle being "Content-Length: 31" plus (crlf with nothing))
+    evaluate is-true with label being "HEAD ends at the header boundary without content",
+        actual being (nil.std.text::ends_with with s being wire, suffix being (crlf with nothing) plus (crlf with nothing))
+    evaluate expect-code with label being "HEAD ignores a satisfiable Range", fields being range,
+        verb being request-method.Head, expected being 200
+    set fields to set-field with fields being range, name being "If-None-Match", content being tag
+    value cached-head is asset with fields being fields, verb being request-method.Head
+    evaluate same-number with label being "HEAD still evaluates preconditions", actual being cached-head.code, expected being 304
+    evaluate is-true with label being "conditional HEAD 304 omits Content-Length",
+        actual being not (nil.std.text::contains with s being (render-response with response being cached-head,
+            verb being request-method.Head), needle being "Content-Length")
+    evaluate expect-code with label being "POST ignores Range", fields being past-end,
+        verb being request-method.Post, expected being 200
+
+    evaluate expect-code with label being "range-unit matching is case insensitive", fields being
+        (one-field with name being "Range", content being "ByTeS=0-5"), verb being request-method.Get, expected being 206
+    set fields to add-field with fields being range, name being "Range", content being "bytes=6-9"
+    evaluate expect-code with label being "multiple Range fields fall back to full content", fields being fields,
+        verb being request-method.Get, expected being 200
+    evaluate is-true with label being "a suffix on an empty representation is ignored",
+        actual being not (range-of with stated being "bytes=-5", width being 0).present
+    evaluate is-true with label being "an explicit range on an empty representation is ignored",
+        actual being not (range-of with stated being "bytes=0-0", width being 0).present
+    evaluate same-number with label being "huge valid suffix clamps without decimal overflow",
+        actual being (range-of with stated being "bytes=-9999999999999999999999999999999999", width being 31).first-byte, expected being 0
+    evaluate same-number with label being "huge valid last offset clamps without decimal overflow",
+        actual being (range-of with stated being "bytes=5-9999999999999999999999999999999999", width being 31).last-byte, expected being 30
+    evaluate is-true with label being "huge first offset remains unsatisfiable",
+        actual being not (range-of with stated being "bytes=9999999999999999999999999999999999-", width being 31).satisfiable
+    evaluate is-true with label being "digits following saturation are still validated",
+        actual being not (range-of with stated being "bytes=-9999999999999999999999999999999999x", width being 31).satisfiable
+    evaluate is-true with label being "whitespace inside a byte interval is invalid",
+        actual being not (range-of with stated being "bytes=0 - 5", width being 31).satisfiable
+
+    value missing-request is make-request with verb being request-method.Get, target being "/missing.css",
+        fields being (one-field with name being "If-None-Match", content being "*"), body being ""
+    evaluate same-number with label being "ordinary missing-file errors precede conditionals",
+        actual being (serve-static with root being "tests/public", path being missing-request.path,
+            request being missing-request, seconds being 60).code, expected being 404
+    evaluate file-body-tests with nothing
+    give nothing
+end paragraph
+
+
+!!! Own one scratch file only, refuse a pre-existing path, and remove it again.
+!!! These are body/framing checks, separate from the containment contract.
+file-body-tests returns nothing begin paragraph
+    value scratch is "build/static-http-contract-fixture.bin"
+    when nil.std.io::exists with path being scratch then
+        evaluate is-true with label being "static HTTP scratch fixture is not already in use", actual being false
+        give nothing
+    end when
+    value binary is "A" plus (nil.std.text::from_byte with code being 0)
+        plus (nil.std.text::from_byte with code being 255) plus (nil.std.text::from_byte with code being 128) plus "Z"
+    value wrote is write-fixture with path being scratch, body being binary
+    evaluate is-true with label being "create an owned binary static fixture", actual being wrote
+    when not wrote then give nothing end when
+    value plain is make-request with verb being request-method.Get, target being "/static-http-contract-fixture.bin",
+        fields being (no-headers with nothing), body being ""
+    value whole is serve-static with root being "build", path being plain.path, request being plain, seconds being 60
+    evaluate same-number with label being "binary file serves successfully", actual being whole.code, expected being 200
+    evaluate same-text with label being "binary file body preserves NUL and high bytes", actual being whole.body, expected being binary
+    evaluate same-text with label being "binary ETag hashes bytes without UTF-8 reinterpretation",
+        actual being (field-value with fields being whole.fields, name being "ETag"),
+        expected being quote plus "2d013a390aa422ff459b7fcf793fd75df0d46f6cb7e4312a7f0b5cfc568250dd" plus quote
+    value ranged is make-request with verb being request-method.Get, target being plain.path,
+        fields being (one-field with name being "Range", content being "bytes=1-3"), body being ""
+    value partial is serve-static with root being "build", path being plain.path, request being ranged, seconds being 60
+    evaluate same-number with label being "binary Range returns partial content", actual being partial.code, expected being 206
+    evaluate same-text with label being "binary Range slices bytes including NUL", actual being partial.body,
+        expected being (nil.std.text::substring with s being binary, start being 1, length being 3)
+    evaluate is-true with label being "binary partial Content-Length counts bytes",
+        actual being (nil.std.text::contains with s being (render-for-get with response being partial),
+            needle being "Content-Length: 3" plus (crlf with nothing))
+
+    value replaced is write-fixture with path being scratch, body being "B" plus
+        (nil.std.text::substring with s being binary, start being 1, length being 4)
+    evaluate is-true with label being "rewrite fixture without changing its length", actual being replaced
+    value changed is serve-static with root being "build", path being plain.path, request being plain, seconds being 60
+    evaluate is-true with label being "same-size file edit changes the strong ETag",
+        actual being (field-value with fields being changed.fields, name being "ETag")
+            does not equal (field-value with fields being whole.fields, name being "ETag")
+
+    value emptied is write-fixture with path being scratch, body being ""
+    evaluate is-true with label being "empty the owned static fixture", actual being emptied
+    value suffix is make-request with verb being request-method.Get, target being plain.path,
+        fields being (one-field with name being "Range", content being "bytes=-5"), body being ""
+    value empty is serve-static with root being "build", path being plain.path, request being suffix, seconds being 60
+    evaluate same-number with label being "empty file ignores suffix range with a full 200", actual being empty.code, expected being 200
+    evaluate same-text with label being "empty file has no invalid Content-Range",
+        actual being (field-value with fields being empty.fields, name being "Content-Range"), expected being ""
+    evaluate is-true with label being "empty response has zero Content-Length",
+        actual being (nil.std.text::contains with s being (render-for-get with response being empty),
+            needle being "Content-Length: 0" plus (crlf with nothing))
+
+    variable large-body as text is "x"
+    variable doubling as number is 0
+    repeat while doubling is less than 21
+        set large-body to large-body plus large-body
+        set doubling to doubling plus 1
+    end repeat
+    value enlarged is write-fixture with path being scratch, body being large-body plus "x"
+    evaluate is-true with label being "create the bounded oversized fixture", actual being enlarged
+    value star is make-request with verb being request-method.Get, target being plain.path,
+        fields being (one-field with name being "If-None-Match", content being "*"), body being ""
+    evaluate same-number with label being "ordinary size refusal precedes a matching wildcard",
+        actual being (serve-static with root being "build", path being plain.path, request being star, seconds being 60).code,
+        expected being 413
+    value removed is nil.std.io::delete with path being scratch
+    evaluate is-true with label being "remove the owned static HTTP fixture",
+        actual being not (nil.std.io::exists with path being scratch)
+    give nothing
+end paragraph
+
+
+write-fixture receives path as text, body as text returns boolean begin paragraph
+    value result is nil.std.io::write_text with path being path, content being body
+    consider result
+        when Result.Ok holding written then give written
+        otherwise give false
+    end consider
+end paragraph

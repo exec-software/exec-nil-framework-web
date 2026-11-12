@@ -14,10 +14,11 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-At web revision `41eb756`, all 653 existing checks pass through the NIL
-interpreter on Linux with framework SDK `9fa354d`. The server supports concurrent
-connections, configuration, virtual hosts, and access and error logs. Request
-framing and static-file handling still have the gaps listed below.
+All 764 current checks pass through the NIL interpreter on Linux with framework
+SDK `9fa354d`. This includes content-based validators and HTTP precondition/range
+ordering. The server supports concurrent connections, configuration, virtual
+hosts, and access and error logs. Request framing, filesystem containment and
+large-file hashing still need the work listed below.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -41,7 +42,7 @@ framing and static-file handling still have the gaps listed below.
 
 ```sh
 ./scripts/serve.sh   # a real server on 127.0.0.1:8080
-./scripts/test.sh    # 653 checks
+./scripts/test.sh    # 764 checks
 ./scripts/demo.sh    # the same requests, printed instead of served
 ```
 
@@ -58,7 +59,8 @@ acted on; the engine frames whole requests out of whatever arrived and the
 application answers them. Many connections are open at once and none can hold
 up another by sending slowly, reading slowly, or stopping halfway.
 
-Measured on the demonstration application: a client that stalls for 1.5
+Historical measurements before content hashing and framing hardening, on the
+demonstration application: a client that stalls for 1.5
 seconds in the middle of its request headers does not delay 120 requests on 40
 other connections, which finish in 0.72s. 64 connections each sending a
 two-part request with a quarter-second pause are served in about one pause
@@ -117,15 +119,22 @@ Current code review also identifies these remaining boundaries:
   explicit rejection and connection closure.
 - **Pipelining:** requests received together are not separated reliably; clearing
   the input after a response can discard the next request.
-- **Conditional and range requests:** `Range` is evaluated before conditional
-  validators, `If-Range` is not handled, and `HEAD` can retain partial-response
-  status and length. These decisions need to be combined correctly.
+- **Static hashing throughput:** validators now use SHA-256 of the bytes served.
+  The pure Matrix implementation passes known vectors and binary reference
+  checks, but takes about 12 seconds for 1 MiB in the interpreter. It needs a
+  faster runtime path before serving large public assets.
 - **Static-file containment:** textual traversal checks do not keep filesystem
   links inside the public root. Reads and metadata need a shared, root-constrained
   filesystem boundary, including intermediate symlinks and Windows junctions.
 
-The 653-check run verifies the existing suite; these code-review findings were
-not re-tested through HTTP network requests in that run.
+Conditional requests now run before ranges. `HEAD` ignores `Range` and retains
+the full representation length while suppressing the wire body. Strong `If-Range`
+tags are supported; date-form `If-Range` conservatively sends the full response.
+Invalid date conditions are ignored; date parsing currently accepts canonical
+IMF-fixdate only. The new checks include same-size, same-timestamp binary edits.
+
+The 764-check run is an interpreter suite. Socket-level framing validation and
+physical filesystem containment remain separate work.
 
 ### This used to say the opposite
 

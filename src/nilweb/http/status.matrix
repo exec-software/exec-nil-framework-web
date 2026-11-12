@@ -29,6 +29,7 @@ public constant status-method-not-allowed as number is 405
 public constant status-not-acceptable as number is 406
 public constant status-request-timeout as number is 408
 public constant status-conflict as number is 409
+public constant status-precondition-failed as number is 412
 public constant status-payload-too-large as number is 413
 public constant status-uri-too-long as number is 414
 public constant status-unsupported-media-type as number is 415
@@ -70,6 +71,7 @@ public reason-phrase receives code as number returns text begin paragraph
         case 406 then stop switching with "Not Acceptable"
         case 408 then stop switching with "Request Timeout"
         case 409 then stop switching with "Conflict"
+        case 412 then stop switching with "Precondition Failed"
         case 413 then stop switching with "Payload Too Large"
         case 414 then stop switching with "URI Too Long"
         case 415 then stop switching with "Unsupported Media Type"

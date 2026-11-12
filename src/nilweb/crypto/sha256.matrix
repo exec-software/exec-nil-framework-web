@@ -1,0 +1,158 @@
+!!! SHA-256 over the exact bytes of a text value, including NUL and invalid
+!!! UTF-8. FIPS 180-4, sections 4.1.2, 4.2.2, 5.1.1, 5.3.3 and 6.2.
+!!!
+!!! Matrix numbers are signed 64-bit values. Every SHA word is kept in
+!!! 0..0xffffffff, so right shifts are logical and additions are explicitly
+!!! reduced modulo 2^32. No native hash provider is involved.
+!!!
+!!! The input is never padded as a whole: only its final partial block is
+!!! copied into a tail of at most 128 bytes. The schedule has 64 words.
+
+book nilweb.crypto.sha256
+
+read nil.std.text
+
+
+public sha256-hex receives data as text returns text begin paragraph
+    value mask as number is 0xffffffff
+    value constants as array of number is [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+
+    variable h0 as number is 0x6a09e667
+    variable h1 as number is 0xbb67ae85
+    variable h2 as number is 0x3c6ef372
+    variable h3 as number is 0xa54ff53a
+    variable h4 as number is 0x510e527f
+    variable h5 as number is 0x9b05688c
+    variable h6 as number is 0x1f83d9ab
+    variable h7 as number is 0x5be0cd19
+
+    value width is nil.std.text::length with s being data
+    value whole-blocks is width over 64
+    variable tail is nil.std.text::substring with s being data,
+        start being whole-blocks times 64, length being width remainder 64
+    set tail to tail plus (nil.std.text::from_byte with code being 128)
+    repeat while (nil.std.text::length with s being tail) remainder 64 does not equal 56
+        set tail to tail plus (nil.std.text::from_byte with code being 0)
+    end repeat
+    value bit-length as number is width times 8
+    variable suffix-byte as number is 7
+    repeat while suffix-byte is at least 0
+        set tail to tail plus (nil.std.text::from_byte with code being
+            (bit-length shifted right by (suffix-byte times 8)) bitwise and 255)
+        set suffix-byte to suffix-byte minus 1
+    end repeat
+
+    variable schedule as array of number is []
+    repeat while the length of schedule is less than 64
+        append 0 to schedule
+    end repeat
+    value block-count is whole-blocks plus (nil.std.text::length with s being tail) over 64
+    variable block-index as number is 0
+    repeat while block-index is less than block-count
+        variable block as text is ""
+        when block-index is less than whole-blocks then
+            set block to nil.std.text::substring with s being data,
+                start being block-index times 64, length being 64
+        otherwise
+            set block to nil.std.text::substring with s being tail,
+                start being (block-index minus whole-blocks) times 64, length being 64
+        end when
+
+        variable word-index as number is 0
+        repeat while word-index is less than 16
+            value offset is word-index times 4
+            value b0 is nil.std.text::byte_at with s being block, index being offset
+            value b1 is nil.std.text::byte_at with s being block, index being offset plus 1
+            value b2 is nil.std.text::byte_at with s being block, index being offset plus 2
+            value b3 is nil.std.text::byte_at with s being block, index being offset plus 3
+            set schedule at word-index to (b0 shifted left by 24)
+                bitwise or (b1 shifted left by 16) bitwise or (b2 shifted left by 8) bitwise or b3
+            set word-index to word-index plus 1
+        end repeat
+        repeat while word-index is less than 64
+            value x is schedule at (word-index minus 15)
+            value y is schedule at (word-index minus 2)
+            value small0 is (((x shifted right by 7) bitwise or (x shifted left by 25))
+                bitwise xor ((x shifted right by 18) bitwise or (x shifted left by 14))
+                bitwise xor (x shifted right by 3)) bitwise and mask
+            value small1 is (((y shifted right by 17) bitwise or (y shifted left by 15))
+                bitwise xor ((y shifted right by 19) bitwise or (y shifted left by 13))
+                bitwise xor (y shifted right by 10)) bitwise and mask
+            set schedule at word-index to ((schedule at (word-index minus 16)) plus small0
+                plus (schedule at (word-index minus 7)) plus small1) bitwise and mask
+            set word-index to word-index plus 1
+        end repeat
+
+        variable a as number is h0
+        variable b as number is h1
+        variable c as number is h2
+        variable d as number is h3
+        variable e as number is h4
+        variable f as number is h5
+        variable g as number is h6
+        variable h as number is h7
+        variable round-index as number is 0
+        repeat while round-index is less than 64
+            value large1 is (((e shifted right by 6) bitwise or (e shifted left by 26))
+                bitwise xor ((e shifted right by 11) bitwise or (e shifted left by 21))
+                bitwise xor ((e shifted right by 25) bitwise or (e shifted left by 7))) bitwise and mask
+            value choose is (e bitwise and f) bitwise xor ((bitwise not e) bitwise and g)
+            value first is (h plus large1 plus choose plus (constants at round-index)
+                plus (schedule at round-index)) bitwise and mask
+            value large0 is (((a shifted right by 2) bitwise or (a shifted left by 30))
+                bitwise xor ((a shifted right by 13) bitwise or (a shifted left by 19))
+                bitwise xor ((a shifted right by 22) bitwise or (a shifted left by 10))) bitwise and mask
+            value majority is (a bitwise and b) bitwise xor (a bitwise and c) bitwise xor (b bitwise and c)
+            value second is (large0 plus majority) bitwise and mask
+            set h to g
+            set g to f
+            set f to e
+            set e to (d plus first) bitwise and mask
+            set d to c
+            set c to b
+            set b to a
+            set a to (first plus second) bitwise and mask
+            set round-index to round-index plus 1
+        end repeat
+
+        set h0 to (h0 plus a) bitwise and mask
+        set h1 to (h1 plus b) bitwise and mask
+        set h2 to (h2 plus c) bitwise and mask
+        set h3 to (h3 plus d) bitwise and mask
+        set h4 to (h4 plus e) bitwise and mask
+        set h5 to (h5 plus f) bitwise and mask
+        set h6 to (h6 plus g) bitwise and mask
+        set h7 to (h7 plus h) bitwise and mask
+        set block-index to block-index plus 1
+    end repeat
+
+    value digest as array of number is [h0, h1, h2, h3, h4, h5, h6, h7]
+    value digits as text is "0123456789abcdef"
+    variable result as text is ""
+    repeat for each word in digest
+        variable shift as number is 28
+        repeat while shift is at least 0
+            value nibble is (word shifted right by shift) bitwise and 15
+            set result to result plus (nil.std.text::substring with s being digits, start being nibble, length being 1)
+            set shift to shift minus 4
+        end repeat
+    end repeat
+    give result
+end paragraph

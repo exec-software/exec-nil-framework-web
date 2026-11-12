@@ -4,6 +4,8 @@
 book nilweb.tests.run
 
 read everything from nilweb.tests.harness
+read everything from nilweb.tests.sha256
+read everything from nilweb.tests.static_http
 read nil.std.core
 read nil.std.text
 read everything from nilweb.text.scan
@@ -738,7 +740,7 @@ static-tests returns nothing begin paragraph
         actual being ((field-value with fields being (serve-cached with root being "tests/public",
             path being "/nope.css", seconds being 60).fields, name being "Cache-Control")) equals ""
 
-    !!! Validators: size and timestamp, without reading the file.
+    !!! Validators identify the bytes served.
     value marks is validators-of with root being "tests/public", path being "/assets/app.css"
     evaluate is-true with label being "a present file has validators", actual being marks.found
     evaluate same-number with label being "the width matches the file", actual being marks.width, expected being 31
@@ -1517,6 +1519,8 @@ main returns number begin paragraph
     evaluate template-tests with nothing
     evaluate session-tests with nothing
     evaluate static-tests with nothing
+    evaluate run-sha256-tests with nothing
+    evaluate run-static-http-tests with nothing
     evaluate middleware-tests with nothing
     evaluate listener-tests with nothing
     evaluate clock-tests with nothing
