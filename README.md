@@ -8,6 +8,10 @@ much older NIL framework. The design survived the move; almost none of the code
 did, because the languages differ in ways that reach the architecture. See
 [Differences from NyWeb](#differences-from-nyweb).
 
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+
+[![Support us on Ko-fi](https://img.shields.io/badge/Support_us-Ko--fi-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/execsoftware)
+
 ## Status
 
 At web revision `41eb756`, all 653 existing checks pass through the NIL
@@ -402,6 +406,13 @@ tests/nilweb/tests/harness.matrix    the checks
 A book lives at the path its name spells: `book nilweb.http.request` is
 `src/nilweb/http/request.matrix`.
 
+## Support our work
+
+You can support Execute Software's work through
+[Ko-fi](https://ko-fi.com/execsoftware). Donations are optional and help fund
+continued development; they do not change what the project provides or what
+its license permits.
+
 ## License
 
-MIT.
+nil-web is licensed under the [MIT License](LICENSE).

@@ -29,12 +29,21 @@ jobs:
             --output scanner.tar.gz
           printf '%s  scanner.tar.gz\n' 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb | sha256sum --check -
           tar -xzf scanner.tar.gz gitleaks
+          printf '[extend]\nuseDefault = true\n' > default.toml
+          : > empty.ignore
       - name: Scan the working tree and the fetched history
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/source-scanner/gitleaks" dir . --no-banner --redact
-          "$RUNNER_TEMP/source-scanner/gitleaks" git . --no-banner --redact
+          flags=(--no-banner --redact=100 --ignore-gitleaks-allow
+                 --config "$RUNNER_TEMP/source-scanner/default.toml"
+                 --gitleaks-ignore-path "$RUNNER_TEMP/source-scanner/empty.ignore"
+                 --max-archive-depth=2 --max-decode-depth=2 --timeout=120)
+          "$RUNNER_TEMP/source-scanner/gitleaks" dir . "${flags[@]}"
+          # Git mode already scans all fetched refs; checkout fetched full history.
+          "$RUNNER_TEMP/source-scanner/gitleaks" git . "${flags[@]}"
+      - name: Verify path-audit detection and safe diagnostics
+        run: python3 -B tests/test_audit_paths.py
       - name: Refuse absolute paths, routable addresses and contact details
         shell: bash
         run: |
@@ -44,6 +53,6 @@ jobs:
           # Loopback, the unspecified address and the RFC 5737/3849
           # documentation ranges are allowed, because a server has to name an
           # address it binds. See scripts/audit-paths.py for the reasoning.
-          python3 scripts/audit-paths.py --root .
+          python3 -B scripts/audit-paths.py --root .
       # Scan reports are not uploaded. Even redacted findings can expose
       # filenames, commit messages and surrounding source context.
