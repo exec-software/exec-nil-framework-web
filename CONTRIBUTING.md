@@ -1,8 +1,8 @@
 # Contributing to nil-web
 
 nil-web is a server-side web framework written in Matrix. Start with the
-[README](README.md) for its current capabilities, known gaps, and tested NIL
-Framework SDK. Keep new library behavior in Matrix where the language supports
+[README](README.md) for its current capabilities, known gaps, and compatible NIL
+Framework build. Keep new library behavior in Matrix where the language supports
 it, and report any required framework changes separately.
 
 ## Development workflow

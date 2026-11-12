@@ -66,8 +66,9 @@ layer.
 
 An event loop, not a connection at a time. `poll` says which sockets can be
 acted on; the engine frames whole requests out of whatever arrived and the
-application answers them. Many connections are open at once and none can hold
-up another by sending slowly, reading slowly, or stopping halfway.
+application answers them. Socket reads and writes are nonblocking, so a slow
+peer does not make the loop wait for its next byte. Application handlers and
+filesystem work still run synchronously on that loop.
 
 Historical measurements before content hashing and framing hardening, on the
 demonstration application: a client that stalls for 1.5
@@ -89,35 +90,34 @@ errors. Per route, at 16 connections:
 
 With logging on, each of those drops by roughly a fifth; see Logs below.
 
-That is a tree-walking interpreter rendering templates, so it is not Apache's
-number. It is the shape that matters: adding connections does not add latency
-until the single core is saturated.
+These are historical measurements of the demonstration on one interpreter
+build, not a throughput or latency guarantee for the current server.
 
 **Keep-alive** is on by default for HTTP/1.1 and off for HTTP/1.0 unless the
 client asks, which is the way round that avoids holding connections no client
 will use again. A connection serves up to 1000 requests before being closed
 anyway, so a long-lived client cannot pin a slot for the life of the process.
 
-**More than one core** means more than one process, because the interpreter
-holds one stack, one heap and one set of globals with no lock anywhere near
-them. `NILWEB_SHARE_PORT=1` turns on `SO_REUSEPORT` so several copies can share
-a port and the kernel balances accepts between them. That is nginx's shape
-rather than Apache's prefork, and it is the one this runtime can keep.
+**Multiple server processes** can share a listening port on Linux and macOS
+with `NILWEB_SHARE_PORT=1`, using `SO_REUSEPORT`. The Windows socket provider
+does not support this option; the demonstration reports that sharing failed
+and keeps its single listener. This server does not dispatch handlers across
+threads or share in-memory sessions between processes.
 
 **Three idle deadlines**, because the three cases differ: 10s for a connection
 that has sent nothing (a scan, or a browser's speculative socket), 20s for a
 request still arriving (which is what slowloris looks like), and 30s between
-keep-alive requests (a real client thinking). Requests are capped at 1 MiB and
-the cap stops the reading rather than rejecting afterwards. At most 1024
-connections are open at once; past that, new ones are closed immediately
-rather than queued, because a queue there is memory held for a client already
-being refused.
+keep-alive requests (a real client thinking). Each wire request, including its
+headers, is capped at 1 MiB; oversized declarations are rejected before waiting
+for the body. One additional socket read of up to 64 KiB can hold bounded
+pipeline surplus. The default connection limit is 1024, configurable through
+`connectionLimit`; accepted connections above that limit are closed.
 
 ### What is still missing for parity
 
-No TLS — it wants an intrinsic family over a TLS library, and until then this
-belongs behind something that terminates it. No HTTP/2, no compression (the
-standard library's `gzip_compress` is still an unbacked declaration), no
+No TLS — use a separate TLS terminator when serving HTTPS. No HTTP/2, no
+response compression (the framework's compression prototype is outside the
+supported standard library), no
 `sendfile`, no reverse proxying. `poll` is O(n) per call in the watch set, which
 starts to matter in the thousands; the interface is shaped so `epoll` can
 replace it underneath without callers noticing.
@@ -209,9 +209,9 @@ will not start without a config file is one nobody can try out. A file that is
 defaults are used, because starting while silently ignoring a file somebody
 wrote is worse than either refusing or obeying.
 
-**An unknown schema is refused rather than read hopefully.** A file declaring a
-version this does not know may mean something different by the same key names,
-and guessing is how a server ends up listening somewhere nobody asked for.
+**An unknown schema is not applied.** The demonstration reports the rejected
+configuration and uses defaults, then applies environment overrides. It does
+not abort startup solely because the configuration file was rejected.
 
 **Sites are matched on `Host`**, with the port stripped and the case folded,
 each with its own template and public roots. A site with no `host` is the
@@ -234,25 +234,21 @@ a web server's log already reads this one:
 because a framework that starts writing files into whatever directory it was
 launched from fills a disk on someone's laptop.
 
-**Buffered, and flushed when the server is idle.** `nil.std.io`'s only
-appending call opens, writes and closes, which is three syscalls per request on
-the hot path, and the handle API that would avoid them is private and takes raw
-byte buffers a Matrix page cannot build. So lines are held and written in
-batches — on an idle pass, which the loop already detects, or when 64 have
-accumulated. The cost is a window: lines buffered when the process dies are
-lost. That is the trade the available I/O imposes, and `flush-now` is there for
-anything that would rather pay the syscalls.
+**Buffered, and flushed when the server is idle.** The logger batches lines
+before calling `nil.std.io::append_text`, rather than opening the log on every
+request. It flushes on an idle pass or when the ordinary access/error buffer
+reaches 64 lines. Lines buffered when the process dies are lost; `flush-now`
+allows an explicit flush. Failed writes discard the affected batch and increase
+`dropped-count` instead of retrying an ever-growing buffer.
 
-**A log line cannot be forged.** Header values are attacker-controlled, and a
-newline in one would end the line and start another of the attacker's
-choosing — a fabricated entry in a file someone will later read as evidence. A
-quote would close a field early and do the same to a parser; a control byte
-would move a terminal's cursor or set a colour. All are replaced with a space,
-one space per byte so the length a reader sees is not changed by sanitising. A
-malformed request logs a dash where its request line would be, rather than its
-bytes.
+**Log fields are sanitized.** Quotes, backslashes, control bytes and DEL are
+replaced with spaces, then surrounding whitespace is trimmed. This prevents
+those bytes from injecting extra lines or breaking quoted fields; it does not
+preserve the original field length. A malformed request logs a dash in place
+of its request line.
 
-**Logging costs about a fifth of the request rate** — 366 req/s becomes 291.
+**Historical logging measurements** showed 366 req/s becoming 291, before the
+current content hashing and framing changes.
 One cause was found and fixed: the loop was parsing every request twice, once
 for the log and once inside `answer`, which was worth 270 → 309 on its own.
 The remaining fifth is not accounted for. Two likely-looking fixes — a
@@ -262,35 +258,47 @@ merits for long inputs rather than credited with a gain they did not produce.
 
 ## Static files
 
-Served with the three things a static file server is expected to do about not
-re-sending what the client already has.
+`serve-static` reads a bounded snapshot through `nil.std.io::read_rooted_snapshot`.
+That snapshot supplies the bytes, modification time and SHA-256 digest from one
+opened file. The 2 MiB cap is checked before the content allocation; oversized
+files receive 413. Other read refusals and missing files receive 404.
 
-**`Last-Modified` and `If-Modified-Since`**, compared at second resolution,
-because an HTTP date has no finer one — a file written 300ms after the second
-the client was told would otherwise look modified on every request forever. An
-unreadable date counts as modified and gets the full representation, which is
-always correct; reading a date wrongly and answering 304 serves a stale page,
-which is the failure that matters.
+**Content ETags.** The strong tag is the quoted lowercase SHA-256 of the exact
+returned bytes, including binary content. It changes when content changes even
+if the file's size and timestamp are preserved. The runtime computes the digest;
+the pure Matrix SHA-256 module is a tested reference, not the static-serving hot
+path. Revalidation still reads and hashes the bounded file before deciding
+whether a body is needed; this module does not cache snapshots between requests.
 
-**ETag and `If-None-Match`.** The tag is built from size and modification time
-— what Apache does by default, and sound for the same reason: a file whose
-length and mtime are both unchanged is, barring deliberate effort, unchanged.
-A content hash would be stronger and wants a hash function the standard
-library does not have yet. A client holding the current tag gets a 304 with no
-body, no `Content-Length` and no `Content-Type`, because the response is not
-the representation.
+**Preconditions.** `If-Match` uses strong comparison and takes precedence over
+`If-Unmodified-Since`. `If-None-Match` uses weak comparison and suppresses
+`If-Modified-Since` whenever the tag field is present. A matching
+`If-None-Match` produces 304 for GET/HEAD and 412 for other applicable methods.
+Failed `If-Match` or `If-Unmodified-Since` conditions produce 412. The 304 response
+carries validators and cache policy, with no body, `Content-Length` or
+`Content-Type`.
+
+**Date validators.** `Last-Modified` and date conditions use second resolution.
+Only canonical IMF-fixdate is parsed; malformed, obsolete or otherwise
+unsupported date values are ignored. A date alone cannot distinguish two
+different representations written within the same second; content ETags do.
+Ignoring a date does not bypass other preconditions or range handling.
 
 **Byte ranges.** `bytes=0-9`, `bytes=500-`, `bytes=-500` for the last 500. A
 206 carries `Content-Range`; a first byte past the end is a 416 naming the real
-length, so a client resuming a download discovers the file changed size rather
-than being quietly handed the wrong bytes. One range per request — a
-multi-range request gets the whole file, which RFC 9110 permits and which
-avoids a multipart body for a case almost nothing sends.
+length. Only GET applies ranges, after preconditions. HEAD keeps the full
+representation length and sends no body. A matching single strong `If-Range`
+tag permits the range; weak tags, mismatches and date-form `If-Range` receive
+the whole representation. Multi-range requests and unknown units are ignored;
+no multipart response is produced. Empty files also ignore `Range`.
 
-**Refusal by shape, before touching the disk** — traversal in any spelling,
-absolute names, drive letters, backslashes, doubled separators, null bytes and
-dotfiles. An unknown extension is `application/octet-stream` and never
-`text/html`, because a browser told something is HTML will run the script in it.
+**Path and file boundaries.** After mapping the URL to a relative name, path
+checks reject traversal components, drive syntax, backslashes, doubled
+separators, NUL and dotfiles. The framework then opens descendants relative to
+the trusted root, rejecting symlinks and Windows reparse points in intermediate
+and final components and accepting only regular files. This is not protection
+against privileged mount changes or hard links placed inside the public root.
+Unknown extensions use `application/octet-stream`.
 
 The dates come from `nilweb.time.clock`, which turns epoch milliseconds into
 HTTP's date format, the Common Log Format stamp and an ISO instant. The
@@ -309,35 +317,34 @@ against the file's modification time — which is why `nil.std.io` grew
 `modified_at`: without it a cache cannot tell whether what it holds is current
 except by re-reading the file, which is the thing the cache exists to avoid.
 
-Serving freezes the cache, so a page costs no filesystem call at all. Set
-`NILWEB_RELOAD=1` to leave it thawed while editing templates.
+Serving freezes the cache after each template's first load, so subsequent
+cache hits do not recheck timestamps or reread that template. Set
+`NILWEB_RELOAD=1` to recheck timestamps while editing; edits that preserve the
+timestamp can remain cached. This template cache is separate from static-file
+content hashing. Template files are trusted application inputs and do not use
+the rooted static-file snapshot boundary.
 
 ## Differences from NyWeb
 
-**Code-behind is gone.** NyWeb gave every page a class implementing `IPage` and
-the router called it. Matrix has no capturing closures, and an array of class
-handles compiles but does not execute, so a callable cannot be stored in a route
-table. A route names its handler with text and the application switches on the
-name. The cost is one `switch` per application; what it buys is a route table
-that is plain data — readable, testable and reorderable without running it.
+**Routes name their handlers.** NyWeb used page classes implementing `IPage`.
+This framework keeps routes as data: each route names a handler and the
+application dispatches on that name. It does not require a stored callback or
+capturing closure. This describes the server's design, not a claim that all
+class arrays or function values are unsupported by the language.
 
 **The template engine is Matrix, not C++.** NyWeb's was 626 lines of C++
 reached by FFI. This one is Matrix, because Matrix can do the string work
 itself, and a template engine written in the language it serves is one the
 people using it can read.
 
-**Middleware is two lists, not a chain of wrapped calls.** The `next(request)`
-shape every other framework uses needs somewhere to capture `next`, and Matrix
-has no capturing closures. What replaces it is a list of guards that run before
-a handler and may answer instead of it, and a list of finishers applied to
-whatever response comes back. A guard cannot wrap a handler in an `attempt` or
-carry a local across the handler; what it can do is be printed, which is more
-than most middleware stacks manage. An unwired guard fails closed with a 500,
-because a configuration mistake in a security check must not be a quiet pass.
+**Middleware uses two lists.** Guards run before the handler and may answer
+instead; finishers apply to the resulting response. This API does not wrap a
+handler in a captured `next` callback or carry a guard's local state through
+that callback. An unwired guard produces 500 instead of silently proceeding.
 
-**Everything is a value.** A response is a record; a finisher takes one and
-gives back another. Nothing mutates a shared request object, which is what makes
-a handler testable without a server.
+**Handlers can be tested without a socket.** Requests and responses are records,
+and finishers return a response. This does not promise immutable records or
+deep-copy semantics; the server engine also uses mutable records internally.
 
 **Parsing happens once.** NyWeb re-split the query string on every lookup, so a
 page reading five parameters parsed the query five times. Here a request is
@@ -376,11 +383,10 @@ the server does. `Secure` is the one choice left to the caller, because a
 
 ## Templates read; they do not evaluate
 
-`<%= user.name %>` does not mean "evaluate this expression". There is no
-runtime evaluator in Matrix — no `eval`, no reflection over locals — so it
-means "look this name up in the context the handler published". NyWeb's engine
-parsed Ny expressions and the runtime evaluated them; that is not available and
-would not be reconstructed here if it were.
+`<%= user.name %>` looks up a name in the context the handler published. The
+template engine does not evaluate arbitrary Matrix expressions or reflect over
+the handler's locals. Includes and layouts use trusted template files; template
+values do not gain access to arbitrary application operations.
 
 It is a narrower contract and a sturdier one. A template can only read what a
 handler decided to publish, so it cannot reach into a session, open a file or
@@ -415,11 +421,13 @@ src/nilweb/http/headers.matrix       header fields
 src/nilweb/http/uri.matrix           percent coding and query strings
 src/nilweb/http/request.matrix       the inbound request
 src/nilweb/http/response.matrix      the outbound response
+src/nilweb/http/framing.matrix       bounded wire framing and pipeline boundaries
 src/nilweb/routing/router.matrix     route matching
 src/nilweb/template/context.matrix   the data a template may read
 src/nilweb/template/render.matrix    the .nilhtml engine
 src/nilweb/session/session.matrix    sessions and their cookie
 src/nilweb/static/files.matrix       serving a directory
+src/nilweb/crypto/sha256.matrix      reference SHA-256 implementation and tests
 src/nilweb/middleware/chain.matrix   guards and finishers
 src/nilweb/server/engine.matrix      the event loop
 src/nilweb/time/clock.matrix         HTTP dates, log stamps, ISO instants
