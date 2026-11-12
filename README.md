@@ -10,8 +10,10 @@ did, because the languages differ in ways that reach the architecture. See
 
 ## Status
 
-Built and tested end to end — 653 checks, all passing. A server that holds many
-connections at once, serves several sites from one port, and logs what it did.
+At web revision `41eb756`, all 653 existing checks pass through the NIL
+interpreter on Linux with framework SDK `9fa354d`. The server supports concurrent
+connections, configuration, virtual hosts, and access and error logs. Request
+framing and static-file handling still have the gaps listed below.
 
 | Module | What it does | State |
 | --- | --- | --- |
@@ -26,9 +28,9 @@ connections at once, serves several sites from one port, and logs what it did.
 | `nilweb.template.context` | the data a template may read | done |
 | `nilweb.template.render` | `.nilhtml` with layouts, partials, loops, escaping | done |
 | `nilweb.session.session` | a server-side store, secure ids, cookie attributes | done |
-| `nilweb.static.files` | serving a directory, with the traversal checks | done |
+| `nilweb.static.files` | static files, validators and byte ranges | partial; see remaining work |
 | `nilweb.middleware.chain` | guards before a handler, finishers after | done |
-| `nilweb.server.engine` | the event loop: accepting, framing, keep-alive | done |
+| `nilweb.server.engine` | the event loop: accepting, framing, keep-alive | partial; see remaining work |
 | `nilweb.time.clock` | HTTP dates, log stamps, ISO instants | done |
 | `nilweb.log.access` | Combined Log Format access log, error log | done |
 | `nilweb.config.settings` | a nildata config file, and virtual hosts | done |
@@ -100,10 +102,26 @@ being refused.
 No TLS — it wants an intrinsic family over a TLS library, and until then this
 belongs behind something that terminates it. No HTTP/2, no compression (the
 standard library's `gzip_compress` is still an unbacked declaration), no
-`sendfile`, no access or error log, no configuration file, no virtual hosts,
-no reverse proxying. `poll` is O(n) per call in the watch set, which starts to
-matter in the thousands; the interface is shaped so `epoll` can replace it
-underneath without callers noticing.
+`sendfile`, no reverse proxying. `poll` is O(n) per call in the watch set, which
+starts to matter in the thousands; the interface is shaped so `epoll` can
+replace it underneath without callers noticing.
+
+Current code review also identifies these remaining boundaries:
+
+- **Request framing:** malformed `Content-Length` can be treated as a zero-length
+  body, and `Transfer-Encoding` is not validated. Invalid framing needs an
+  explicit rejection and connection closure.
+- **Pipelining:** requests received together are not separated reliably; clearing
+  the input after a response can discard the next request.
+- **Conditional and range requests:** `Range` is evaluated before conditional
+  validators, `If-Range` is not handled, and `HEAD` can retain partial-response
+  status and length. These decisions need to be combined correctly.
+- **Static-file containment:** textual traversal checks do not keep filesystem
+  links inside the public root. Reads and metadata need a shared, root-constrained
+  filesystem boundary, including intermediate symlinks and Windows junctions.
+
+The 653-check run verifies the existing suite; these code-review findings were
+not re-tested through HTTP network requests in that run.
 
 ### This used to say the opposite
 
